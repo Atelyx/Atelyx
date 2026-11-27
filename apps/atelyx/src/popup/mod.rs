@@ -67,6 +67,7 @@ pub(crate) fn element<'a>(
         PopupState::CanvasCardMenu { .. }
         | PopupState::CanvasGroupMenu { .. }
         | PopupState::CanvasMultiMenu
+        | PopupState::CanvasEdgeMenu { .. }
         | PopupState::CanvasBlankMenu { .. }
         | PopupState::CanvasGroupRename { .. } => canvas::entries(app, state),
         PopupState::AiModelMenu
@@ -130,6 +131,7 @@ pub(crate) fn width(state: &PopupState) -> f32 {
         PopupState::CanvasCardMenu { .. }
         | PopupState::CanvasGroupMenu { .. }
         | PopupState::CanvasMultiMenu
+        | PopupState::CanvasEdgeMenu { .. }
         | PopupState::CanvasBlankMenu { .. }
         | PopupState::CanvasGroupRename { .. } => canvas::width(state),
         PopupState::AiModelMenu

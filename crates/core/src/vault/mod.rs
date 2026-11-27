@@ -523,6 +523,17 @@ pub fn init_vault_dirs(root: &Path) -> Result<(), String> {
     std::fs::create_dir_all(root.join(".atelyx")).map_err(|e| e.to_string())
 }
 
+/// 绝对目录 → 仓库内相对目录（空串 = 仓库根）；不在仓库内 / 路径不可达 = Err。
+/// 写入前用它把「系统目录选择器」的结果收回仓库边界，越界一律拒绝。
+pub fn relative_to_root(root: &Path, abs: &Path) -> Result<String, String> {
+    let root = dunce::canonicalize(root).map_err(|_| "仓库根不可达".to_string())?;
+    let abs = dunce::canonicalize(abs).map_err(|e| format!("目录不存在：{e}"))?;
+    let rest = abs
+        .strip_prefix(&root)
+        .map_err(|_| "所选目录不在当前仓库内".to_string())?;
+    Ok(rest.to_string_lossy().replace('\\', "/"))
+}
+
 /// 两路径是否指向同一物理文件（case-only 重命名在大小写不敏感文件系统上的场景）。
 /// 都 canonicalize 成功且相等才豁免；任一失败（身份不明）不豁免（宁可拒绝覆盖，不可删错文件）。
 /// 画布/表格写路径共用：Windows NTFS 下 `Foo.atlx` → `foo.atlx` 新旧路径是同一文件，
@@ -2019,5 +2030,25 @@ mod file_name_tests {
         assert_eq!(draft_file_name("笔记.md", Some("md")).as_deref(), Some("笔记"));
         assert_eq!(draft_file_name("素材", None).as_deref(), Some("素材"));
         assert_eq!(draft_file_name("  ", Some("md")), None);
+    }
+}
+
+#[cfg(test)]
+mod relative_to_root_tests {
+    use super::relative_to_root;
+
+    /// 系统目录选择器的结果必须收回仓库边界：仓库内映射成相对目录，越界一律拒绝。
+    #[test]
+    fn maps_inside_dir_and_rejects_outside() {
+        let base = std::env::temp_dir().join(format!("atelyx-relroot-{}", std::process::id()));
+        let root = base.join("仓库");
+        let sub = root.join("子目录");
+        let outside = base.join("外部");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(relative_to_root(&root, &root).unwrap(), "");
+        assert_eq!(relative_to_root(&root, &sub).unwrap(), "子目录");
+        assert!(relative_to_root(&root, &outside).is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

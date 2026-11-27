@@ -15,6 +15,46 @@ use super::common::popup_hint;
 
 pub(super) fn entries<'a>(app: &'a App, state: &PopupState) -> Vec<(usize, MenuEntry<'a, Message>)> {
     match state {
+        PopupState::CanvasEdgeMenu { edge_id } => {
+            // 连线右键：语义切换 + 反向 + 删除（选中态同步由打开菜单的按压完成）
+            let association = app
+                .canvas
+                .as_ref()
+                .and_then(|s| s.data.edges.iter().find(|e| &e.id == edge_id))
+                .is_some_and(|e| e.directed == Some(false));
+            vec![
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        if association { "改为数据流" } else { "改为关联" },
+                        if association { "link" } else { "unlink" },
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::ToggleEdgeKind {
+                            edge: edge_id.clone(),
+                        }),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "反转方向",
+                        "refresh",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::ReverseEdge {
+                            edge: edge_id.clone(),
+                        }),
+                    ),
+                ),
+                (
+                    2,
+                    MenuEntry::danger(
+                        "删除连线",
+                        "bin",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteEdge {
+                            edge: edge_id.clone(),
+                        }),
+                    ),
+                ),
+            ]
+        }
         PopupState::CanvasCardMenu { node_id } => {
             let node = app
                 .canvas
@@ -35,17 +75,52 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState) -> Vec<(usize, MenuE
                         ),
                     ));
                 }
-                Some("table") | Some("text") => {
+                Some("text") => {
                     if let Some(rel) = node.and_then(|n| n.data.get("file")).and_then(Value::as_str) {
-                        let label = if node.is_some_and(|n| n.node_type == "table") {
-                            "打开表格"
-                        } else {
-                            "打开笔记"
-                        };
-                        entries.push((0, MenuEntry::action_icon(label, "external-link", Message::OpenFile(rel.to_string()))));
+                        entries.push((0, MenuEntry::action_icon("打开笔记", "external-link", Message::OpenFile(rel.to_string()))));
+                    } else {
+                        entries.push((
+                            0,
+                            MenuEntry::action_icon(
+                                "编辑文本卡",
+                                "pencil",
+                                canvas_menu(crate::canvas_view::CanvasMenuAction::EditTextCard { node: node_id.clone() }),
+                            ),
+                        ));
+                        entries.push((
+                            0,
+                            MenuEntry::action_icon(
+                                "保存为笔记…",
+                                "file-plus",
+                                canvas_menu(crate::canvas_view::CanvasMenuAction::SaveAsNote { node: node_id.clone() }),
+                            ),
+                        ));
+                    }
+                }
+                Some("table") => {
+                    if let Some(rel) = node.and_then(|n| n.data.get("file")).and_then(Value::as_str) {
+                        entries.push((0, MenuEntry::action_icon("打开表格", "external-link", Message::OpenFile(rel.to_string()))));
                     }
                 }
                 _ => {}
+            }
+            // 文本卡色板（按主题分色，便于头脑风暴分组阅读）
+            if node.is_some_and(|n| n.node_type == "text") {
+                let current = node
+                    .and_then(|n| n.data.get("color"))
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                entries.push((0, MenuEntry::Submenu { label: "颜色".into(), icon: Some("palette".into()), disabled: false, pane: 1 }));
+                for (i, color) in pal::CANVAS_GROUP_COLORS.iter().enumerate() {
+                    let idx = i + 1;
+                    entries.push(color_row(
+                        idx,
+                        current,
+                        *color,
+                        crate::canvas_view::CanvasMenuAction::TextColor { node: node_id.clone(), index: idx },
+                    ));
+                }
             }
             entries.push((
                 2,
@@ -102,39 +177,11 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState) -> Vec<(usize, MenuE
             // 颜色子面板（pane 1）：色板行 + 当前色角标
             for (i, color) in crate::ui::palette::CANVAS_GROUP_COLORS.iter().enumerate() {
                 let idx = i + 1;
-                let swatch = container(space().width(12.0).height(12.0)).style(move |_| {
-                    iced::widget::container::Style {
-                        background: Some((*color).into()),
-                        border: iced::border::rounded(3.0).color(crate::ui::palette::BORDER),
-                        ..Default::default()
-                    }
-                });
-                entries.push((
-                    1,
-                    MenuEntry::Custom(
-                        iced::widget::button(
-                            row![
-                                swatch,
-                                text(if idx == current {
-                                    format!("色 {idx}（当前）")
-                                } else {
-                                    format!("色 {idx}")
-                                })
-                                .size(pal::fs_caption()),
-                            ]
-                                .spacing(8)
-                                .align_y(iced::alignment::Vertical::Center),
-                        )
-                        .padding(Padding::ZERO.horizontal(12.0).vertical(5.0))
-                        .width(Length::Fill)
-                        .style(|t, s| controls::row_style(false, pal::RADIUS_SM)(t, s))
-                        .on_press(canvas_menu(crate::canvas_view::CanvasMenuAction::GroupColor {
-                            node: node_id.clone(),
-                            index: idx,
-                        }))
-                        .into(),
-                        28.0,
-                    ),
+                entries.push(color_row(
+                    idx,
+                    current,
+                    *color,
+                    crate::canvas_view::CanvasMenuAction::GroupColor { node: node_id.clone(), index: idx },
                 ));
             }
             entries
@@ -260,6 +307,7 @@ pub(super) fn width(state: &PopupState) -> f32 {
         PopupState::CanvasCardMenu { .. } => 144.0,
         PopupState::CanvasGroupMenu { .. } => 160.0,
         PopupState::CanvasMultiMenu => 144.0,
+        PopupState::CanvasEdgeMenu { .. } => 144.0,
         PopupState::CanvasBlankMenu { .. } => 144.0,
         PopupState::CanvasGroupRename { .. } => 200.0,
         _ => unreachable!("宽度按域分派，本域以外的变体不会到这里"),
@@ -269,6 +317,41 @@ pub(super) fn width(state: &PopupState) -> f32 {
 /// 画布右键菜单动作消息。
 fn canvas_menu(action: crate::canvas_view::CanvasMenuAction) -> Message {
     Message::Canvas(crate::canvas_view::CanvasMsg::Menu(action))
+}
+
+/// 色板行（分组 / 文本卡共用）：色块 + 「色 N」/「色 N（当前）」。
+fn color_row(
+    index: usize,
+    current: usize,
+    color: iced::Color,
+    action: crate::canvas_view::CanvasMenuAction,
+) -> (usize, MenuEntry<'static, Message>) {
+    let swatch = container(space().width(12.0).height(12.0)).style(move |_| iced::widget::container::Style {
+        background: Some(color.into()),
+        border: iced::border::rounded(3.0).color(pal::BORDER),
+        ..Default::default()
+    });
+    let label = if index == current {
+        format!("色 {index}（当前）")
+    } else {
+        format!("色 {index}")
+    };
+    (
+        1,
+        MenuEntry::Custom(
+            iced::widget::button(
+                row![swatch, text(label).size(pal::fs_caption())]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center),
+            )
+            .padding(Padding::ZERO.horizontal(12.0).vertical(5.0))
+            .width(Length::Fill)
+            .style(|t, s| controls::row_style(false, pal::RADIUS_SM)(t, s))
+            .on_press(canvas_menu(action))
+            .into(),
+            28.0,
+        ),
+    )
 }
 
 /// 画布分组改名输入（提交由菜单项动作携带草稿；每次渲染重建携带最新草稿）。

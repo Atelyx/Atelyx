@@ -158,6 +158,8 @@ pub(crate) enum PopupState {
     CanvasGroupMenu { node_id: String },
     /// 画布：多选右键（批量删除 / 复制 / 编组）。
     CanvasMultiMenu,
+    /// 画布：连线右键（删除 / 反向 / 切换数据流与关联）。
+    CanvasEdgeMenu { edge_id: String },
     /// 画布：空白右键（粘贴 / 新建分组）。
     CanvasBlankMenu { x: f64, y: f64 },
     /// 画布：分组改名（内联输入）。

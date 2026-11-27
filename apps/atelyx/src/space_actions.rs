@@ -3769,7 +3769,7 @@ fn on_remote_canvas_patch(
     if app.canvas.as_ref().is_some_and(|s| p.id != s.data.id) {
         return Task::none();
     }
-    let (mut ref_paths, conversation_ids, text_changed) = {
+    let (mut ref_paths, conversation_ids, text_changed, editing_closed) = {
         let Some(s) = app.canvas.as_mut() else { return Task::none() };
         let outcome = atelyx_core::canvas_collab::apply_remote_patch(&mut s.data, &mut s.saved, &p, landed);
         s.version += 1;
@@ -3781,6 +3781,28 @@ fn on_remote_canvas_patch(
         s.view.selection.retain(|id| s.data.nodes.iter().any(|n| &n.id == id));
         if s.view.hover.as_ref().is_some_and(|id| !s.data.nodes.iter().any(|n| &n.id == id)) {
             s.view.hover = None;
+        }
+        if let Some(id) = s.view.selected_edge.as_ref() {
+            if !s.data.edges.iter().any(|e| &e.id == id) {
+                s.view.selected_edge = None;
+            }
+        }
+        if let Some(id) = s.view.hover_edge.as_ref() {
+            if !s.data.edges.iter().any(|e| &e.id == id) {
+                s.view.hover_edge = None;
+            }
+        }
+        // 正在编辑的文本卡被远端改写 / 删除：退出编辑——编辑器里是合入前的旧副本，
+        // 继续按键会把协作者的内容整段盖回去
+        let editing_closed = s.view.editing.as_ref().is_some_and(|ed| {
+            p.upsert_nodes.iter().any(|n| n.id == ed.node)
+                || outcome.removed_node_ids.iter().any(|id| id == &ed.node)
+                || !s.data.nodes.iter().any(|n| n.id == ed.node)
+        });
+        if editing_closed {
+            s.view.editing = None;
+            crate::canvas_actions::rebuild_text_docs(s);
+            s.redraw();
         }
         if s
             .view
@@ -3798,10 +3820,14 @@ fn on_remote_canvas_patch(
             outcome.ref_paths,
             outcome.upserted_conversations,
             p.upsert_nodes.iter().any(|n| n.node_type == "text"),
+            editing_closed,
         )
     };
     ref_paths.sort();
     ref_paths.dedup();
+    if editing_closed {
+        app.notify(crate::NoticeLevel::Info, "协作者更新了正在编辑的文本卡，已退出编辑");
+    }
     crate::canvas_chat::sync_card_chats(app);
     if !conversation_ids.is_empty() {
         // 消息流解析缓存随新消息重建；面板绑定了被更新卡时跟随刷新

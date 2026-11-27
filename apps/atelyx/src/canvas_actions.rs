@@ -4,16 +4,17 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
 use iced::Task;
+use iced::widget::text_editor;
 use serde_json::{json, Value};
 
 use atelyx_core::ai::doc_edit::DocModel;
 use atelyx_core::vault::CanvasFileNode;
 
 use crate::canvas_view::{
-    bbox_of_rects, display_size, group_members, group_of, hidden_by_collapsed, hit_card, hit_link_handle,
+    bbox_of_rects, display_size, group_members, group_of, hidden_by_collapsed, hit_card, hit_link_port,
     hit_resize_handle, marquee_hit, snap_move, snap_size, world_from_screen, CanvasKey,
     CanvasMenuAction, CanvasMsg, CanvasSession, CanvasSnapshot, DragKind, GROUP_PAD, RefContent,
-    SaveReason, View, CARD_HEADER_H, MARQUEE_MIN, SNAP_GRID, UNDO_DEPTH,
+    SaveReason, TextEditor, View, CARD_HEADER_H, MARQUEE_MIN, SNAP_GRID, UNDO_DEPTH,
 };
 pub(crate) use crate::canvas_view::{LoadOut, RefRaw};
 use crate::layout_view::{PopupOpen, PopupState};
@@ -728,6 +729,8 @@ fn readonly_message(msg: &CanvasMsg) -> bool {
         | CanvasMsg::Context { .. }
         | CanvasMsg::PasteText(_)
         | CanvasMsg::Menu(_)
+        | CanvasMsg::TextEdit(_)
+        | CanvasMsg::EditText(Some(_))
         | CanvasMsg::GroupRenameDraft(_) => true,
         CanvasMsg::Key(key) => !matches!(key, CanvasKey::Copy | CanvasKey::SelectAll),
         CanvasMsg::Chat(chat) => !matches!(
@@ -786,8 +789,13 @@ pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
         CanvasMsg::Chat(msg) => crate::canvas_chat::on_msg(app, msg),
         CanvasMsg::Hover(hover) => {
             let Some(s) = app.canvas.as_mut() else { return Task::none() };
-            if s.view.hover != hover {
-                s.view.hover = hover;
+            // 离开画布同时清悬停连线（Pointer 光标与描边不残留）
+            let changed = s.view.hover != hover || (hover.is_none() && s.view.hover_edge.is_some());
+            s.view.hover = hover;
+            if s.view.hover.is_none() {
+                s.view.hover_edge = None;
+            }
+            if changed {
                 s.redraw();
             }
             Task::none()
@@ -830,6 +838,15 @@ pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
         }
         CanvasMsg::PasteText(text) => on_paste(app, text),
         CanvasMsg::Key(key) => on_key(app, key),
+        CanvasMsg::TextEdit(action) => on_text_edit(app, action),
+        CanvasMsg::NoteSaved { file, node, rel, result } => on_note_saved(app, &file, &node, &rel, result),
+        CanvasMsg::EditText(id) => match id {
+            Some(id) => begin_text_edit(app, &id),
+            None => {
+                end_text_edit(app);
+                Task::none()
+            }
+        },
         CanvasMsg::GroupRenameDraft(text) => {
             if let Some((_, draft)) = app
                 .canvas
@@ -905,8 +922,8 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
         s.redraw();
         return Task::none();
     }
-    // 连接点优先于卡体：悬停 / 选中的资产卡右侧圆点 = 拖线起手
-    if let Some(source) = hit_link_handle(
+    // 连接点优先于卡体：悬停 / 选中卡的四边中点 = 拖线起手（Shift 起手 = 无向关联边）
+    if let Some((source, side)) = hit_link_port(
         &s.data,
         s.view.hover.as_deref(),
         &s.view.selection,
@@ -914,8 +931,10 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
         world,
     ) {
         s.view.selection = vec![source.clone()];
+        s.view.selected_edge = None;
+        close_text_edit(s);
         s.view.drag = Some(crate::canvas_view::DragState {
-            kind: DragKind::Link(source),
+            kind: DragKind::Link { source, side, association: shift },
             start: (pos.x, pos.y),
             orig: HashMap::new(),
             mutated: false,
@@ -927,6 +946,8 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
     match hit_card(&s.data, world) {
         Some(i) => {
             let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
+            s.view.selected_edge = None;
+            close_text_edit(s);
             if shift {
                 // Shift+点击 = 切换选中（多选），不起拖拽
                 match s.view.selection.iter().position(|x| x == &id) {
@@ -960,6 +981,14 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
             s.redraw();
         }
         None => {
+            // 空白处先判连线：点中一条边 = 选中该边（不进入框选）
+            if let Some(edge) = crate::canvas_view::hit_edge(&s.data, &view, (pos.x, pos.y)) {
+                s.view.selected_edge = Some(edge);
+                s.view.selection.clear();
+                close_text_edit(s);
+                s.redraw();
+                return Task::none();
+            }
             // 空白按压 = 框选起手（Shift 框选并入原选中）；平移走中键
             let base = if shift {
                 std::mem::take(&mut s.view.selection)
@@ -967,6 +996,8 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
                 s.view.selection = Vec::new();
                 Vec::new()
             };
+            s.view.selected_edge = None;
+            close_text_edit(s);
             s.view.guides.clear();
             s.view.marquee_to = Some((pos.x, pos.y));
             s.view.drag = Some(crate::canvas_view::DragState {
@@ -986,12 +1017,18 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
     commit_fit(s, size);
     // 先取出拖拽会话（克隆轻量字段），再变更会话状态
     let Some(drag) = s.view.drag.as_ref().map(|d| (d.kind.clone(), d.start, d.orig.clone())) else {
-        // 非拖拽：刷新悬停卡（连接点显形条件）
+        // 非拖拽：刷新悬停卡（连接点显形条件）与悬停连线（Pointer 与强调描边）
         let view = View::of(&s.view);
         let world = world_from_screen(&view, pos.x, pos.y);
         let hover = hit_card(&s.data, world).map(|i| s.data.nodes[i].id.clone());
-        if hover != s.view.hover {
+        let hover_edge = if hover.is_none() {
+            crate::canvas_view::hit_edge(&s.data, &view, (pos.x, pos.y))
+        } else {
+            None
+        };
+        if hover != s.view.hover || hover_edge != s.view.hover_edge {
             s.view.hover = hover;
+            s.view.hover_edge = hover_edge;
             s.redraw();
         }
         return Task::none();
@@ -1076,7 +1113,7 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
             s.clear_failure_sequence();
             s.view.content_cache.clear();
         }
-        DragKind::Link(_) => {
+        DragKind::Link { .. } => {
             s.view.link_to = Some((pos.x, pos.y));
             s.redraw();
         }
@@ -1123,7 +1160,7 @@ pub(crate) fn cancel_drag(app: &mut App) -> bool {
         }
         // 未完成框选：回到起手选中，不保留半途并集
         DragKind::Marquee { base } => s.view.selection = base,
-        DragKind::Pan | DragKind::Link(_) => {}
+        DragKind::Pan | DragKind::Link { .. } => {}
     }
     s.redraw();
     true
@@ -1138,7 +1175,9 @@ fn mark_drag_mutated(s: &mut CanvasSession) {
 
 fn on_release(app: &mut App) -> Task<Message> {
     // 拖线收口：先取出会话与落点，再改画布数据（append_card_ref 要可变借用 App）
+    // 落点 = 卡则建边（落到对话卡同时登记引用）；落点 = 空白则新建文本卡并连上，直接进编辑
     let mut link: Option<(String, String)> = None;
+    let mut blank_note: Option<(String, &'static str, f64, f64)> = None;
     {
         let Some(s) = app.canvas.as_mut() else { return Task::none() };
         let to = s.view.link_to;
@@ -1157,14 +1196,33 @@ fn on_release(app: &mut App) -> Task<Message> {
         s.view.marquee_to = None;
         s.view.guides.clear();
         match kind {
-            Some(DragKind::Link(source)) => {
+            Some(DragKind::Link { source, side, association }) => {
                 let Some((x, y)) = to else { return Task::none() };
                 let view = View::of(&s.view);
                 let world = world_from_screen(&view, x, y);
-                if let Some(i) = hit_card(&s.data, world) {
-                    let target = &s.data.nodes[i];
-                    if target.node_type == "conversation" && target.id != source {
-                        link = Some((target.id.clone(), source));
+                match hit_card(&s.data, world) {
+                    Some(i) => {
+                        let target_id = s.data.nodes[i].id.clone();
+                        let target_type = s.data.nodes[i].node_type.clone();
+                        if target_id != source && target_type != "group" {
+                            let target_side = crate::canvas_view::side_toward(&s.data, &source, &target_id);
+                            // 同向同句柄的边已存在 = 重复拖线：不建边、不压撤销步、也不重复登记引用
+                            if !edge_identical(s, &source, side, &target_id, target_side, association) {
+                                push_undo(s);
+                                crate::canvas_view::connect(
+                                    &mut s.data, &source, side, &target_id, target_side, association,
+                                );
+                                s.touch();
+                                // 落到对话卡 = 同时登记引用（拖线即引用的既有语义；关联边不引用）
+                                if target_type == "conversation" && !association {
+                                    link = Some((target_id, source));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // 拖线到空白：新建空文本卡并连上（起手侧 → 落点最近侧），随即进入编辑
+                        blank_note = Some((source, side, world.0, world.1));
                     }
                 }
             }
@@ -1198,6 +1256,16 @@ fn on_release(app: &mut App) -> Task<Message> {
     }
     if let Some((target, source)) = link {
         crate::canvas_chat::append_card_ref(app, &target, &source);
+    }
+    if let Some((source, side, x, y)) = blank_note {
+        if let Some(id) = create_text_card_at(app, x, y) {
+            if let Some(s) = app.canvas.as_mut() {
+                let target_side = crate::canvas_view::side_toward(&s.data, &source, &id);
+                crate::canvas_view::connect(&mut s.data, &source, side, &id, target_side, false);
+                s.touch();
+            }
+            return begin_text_edit(app, &id);
+        }
     }
     Task::none()
 }
@@ -1296,11 +1364,17 @@ fn push_snapshot(s: &mut CanvasSession) {
 }
 
 /// 恢复快照：置脏 + 版本自增（主循环排自动保存），选中收敛到仍存在的卡。
+/// 文本卡正文随快照回退，只读渲染缓存必须按回退后的正文重建。
 fn restore_snapshot(s: &mut CanvasSession, snap: CanvasSnapshot) {
     s.data.nodes = snap.nodes;
     s.data.edges = snap.edges;
     s.view.selection.retain(|id| s.data.nodes.iter().any(|n| &n.id == id));
+    s.view.selected_edge = None;
+    s.view.editing = None;
     s.view.hover = None;
+    s.view.hover_edge = None;
+    rebuild_text_docs(s);
+    s.redraw();
     s.touch();
 }
 
@@ -1347,6 +1421,7 @@ pub(crate) fn key_ready(app: &App) -> bool {
     // 拖拽 / 框选会话进行中不接键盘命令（中途回滚与几何改写互相踩）
     if app.popup.is_some()
         || s.view.drag.is_some()
+        || s.view.editing.is_some()
         || s.view.card_chat.values().any(|c| c.draft.focused)
     {
         return false;
@@ -1382,6 +1457,8 @@ fn on_key(app: &mut App, key: CanvasKey) -> Task<Message> {
             Task::none()
         }
         CanvasKey::DeleteSelection => delete_selection(app),
+        CanvasKey::AddChild => quick_add(app, true),
+        CanvasKey::AddSibling => quick_add(app, false),
     }
 }
 
@@ -1395,12 +1472,24 @@ fn select_all(app: &mut App) {
         .filter(|n| n.node_type != "group" && !hidden_by_collapsed(&s.data.nodes, &n.id))
         .map(|n| n.id.clone())
         .collect();
+    s.view.selected_edge = None;
     s.redraw();
 }
 
-/// 删除选中：组只删容器（成员保留），卡连带关联边与卡内 run。
+/// 删除选中：先删选中的连线；否则删卡（组只删容器，卡连带关联边与卡内 run）。
 fn delete_selection(app: &mut App) -> Task<Message> {
     let Some(s) = app.canvas.as_ref() else { return Task::none() };
+    if let Some(edge_id) = s.view.selected_edge.clone() {
+        let Some(s) = app.canvas.as_mut() else { return Task::none() };
+        if s.data.edges.iter().any(|e| e.id == edge_id) {
+            push_undo(s);
+            s.data.edges.retain(|e| e.id != edge_id);
+            s.view.selected_edge = None;
+            s.view.hover_edge = None;
+            s.touch();
+        }
+        return Task::none();
+    }
     if s.view.selection.is_empty() {
         return Task::none();
     }
@@ -1562,6 +1651,8 @@ fn on_context(
     let state = match hit_card(&s.data, world) {
         Some(i) => {
             let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
+            // 卡 / 分组右键接管选中：连线选中让位，否则菜单里的「删除」会删掉上一条选中的边
+            s.view.selected_edge = None;
             if !s.view.selection.iter().any(|x| x == &id) {
                 s.view.selection = vec![id.clone()];
                 s.redraw();
@@ -1576,7 +1667,17 @@ fn on_context(
             }
         }
         // 空白不清选中：菜单「复制」作用于当前选中集（左键原地点击仍清选）
-        None => PopupState::CanvasBlankMenu { x: world.0, y: world.1 },
+        None => match crate::canvas_view::hit_edge(&s.data, &view, (pos.x, pos.y)) {
+            // 点在连线上 = 连线菜单（同时选中这条边，Delete 也可删）
+            Some(edge) => {
+                s.view.selected_edge = Some(edge.clone());
+                s.view.selection.clear();
+                close_text_edit(s);
+                s.redraw();
+                PopupState::CanvasEdgeMenu { edge_id: edge }
+            }
+            None => PopupState::CanvasBlankMenu { x: world.0, y: world.1 },
+        },
     };
     // 锚点取窗口坐标（pos 是画布部件局部坐标，弹层按窗口视口定位）；经 PopupOpen 统一复位 pane
     let point = app.cursor_for(window);
@@ -1602,6 +1703,27 @@ fn on_menu(app: &mut App, window: Option<iced::window::Id>, action: CanvasMenuAc
             set_group_color(app, &node, index);
             Task::none()
         }
+        CanvasMenuAction::TextColor { node, index } => {
+            set_text_color(app, &node, index);
+            Task::none()
+        }
+        CanvasMenuAction::EditTextCard { node } => begin_text_edit(app, &node),
+        CanvasMenuAction::SaveAsNote { node } => save_as_note(app, &node),
+        CanvasMenuAction::DeleteEdge { edge } => {
+            if let Some(s) = app.canvas.as_mut() {
+                s.view.selected_edge = Some(edge);
+                s.view.selection.clear();
+            }
+            delete_selection(app)
+        }
+        CanvasMenuAction::ReverseEdge { edge } => {
+            reverse_edge(app, &edge);
+            Task::none()
+        }
+        CanvasMenuAction::ToggleEdgeKind { edge } => {
+            toggle_edge_kind(app, &edge);
+            Task::none()
+        }
         CanvasMenuAction::GroupRenameStart { node } => {
             let Some(w) = window else { return Task::none() };
             let point = app.cursor_for(w);
@@ -1619,10 +1741,7 @@ fn on_menu(app: &mut App, window: Option<iced::window::Id>, action: CanvasMenuAc
             create_conversation_at(app, x, y);
             Task::none()
         }
-        CanvasMenuAction::CreateTextAt { x, y } => {
-            create_text_at(app, x, y);
-            Task::none()
-        }
+        CanvasMenuAction::CreateTextAt { x, y } => create_text_at(app, x, y),
         CanvasMenuAction::OpenInPanel(id) => crate::canvas_chat::on_msg(
             app,
             crate::canvas_chat::CanvasChatMsg::OpenInPanel(id),
@@ -1642,24 +1761,36 @@ fn on_double_press(
         Rename(String),
         Collapse(String),
         Open(String),
+        EditTextCard(String),
     }
     let hit = {
         let Some(s) = app.canvas.as_mut() else { return Task::none() };
         commit_fit(s, size);
         let view = View::of(&s.view);
         let world = world_from_screen(&view, pos.x, pos.y);
-        let Some(i) = hit_card(&s.data, world) else { return Task::none() };
+        let Some(i) = hit_card(&s.data, world) else {
+            // 空白双击 = 就地新建文本卡并进入编辑（白板最快的落笔路径）；
+            // 双击的第二下已起了框选，先收掉它，否则起笔时还画着选择框
+            s.view.drag = None;
+            s.view.marquee_to = None;
+            s.redraw();
+            return create_text_card_at(app, world.0, world.1)
+                .map(|id| begin_text_edit(app, &id))
+                .unwrap_or_else(Task::none);
+        };
         let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
         match node_type.as_str() {
             "group" if world.1 <= s.data.nodes[i].y + CARD_HEADER_H as f64 => Double::Rename(id),
             "group" => Double::Collapse(id),
-            "table" | "text" => {
-                // 表格卡双击开表、笔记引用卡双击开笔记（画布内文本无双开形态）
-                match s.data.nodes[i].data.get("file").and_then(Value::as_str) {
-                    Some(f) => Double::Open(f.to_string()),
-                    None => return Task::none(),
-                }
-            }
+            "text" => match s.data.nodes[i].data.get("file").and_then(Value::as_str) {
+                // 引用笔记的文本卡双击开笔记；画布内文本卡双击就地编辑
+                Some(f) => Double::Open(f.to_string()),
+                None => Double::EditTextCard(id),
+            },
+            "table" => match s.data.nodes[i].data.get("file").and_then(Value::as_str) {
+                Some(f) => Double::Open(f.to_string()),
+                None => return Task::none(),
+            },
             _ => return Task::none(),
         }
     };
@@ -1674,6 +1805,7 @@ fn on_double_press(
             Task::none()
         }
         Double::Open(rel) => Task::done(Message::OpenFile(rel)),
+        Double::EditTextCard(node) => begin_text_edit(app, &node),
     }
 }
 
@@ -1737,17 +1869,21 @@ fn create_group_at(app: &mut App, x: f64, y: f64) {
 
 /// 空白处新建对话卡（缺省尺寸；Agent 与模型不指定 = 发送时回落内置「对话」与仓库默认模型）。
 fn create_conversation_at(app: &mut App, x: f64, y: f64) {
-    create_card_at(app, "conversation", json!({}), x, y);
+    let _ = create_card_at(app, "conversation", json!({}), x, y);
 }
 
-/// 空白处新建画布内文本卡（正文空，随 `.atlx` 内嵌）。
-fn create_text_at(app: &mut App, x: f64, y: f64) {
-    create_card_at(app, "text", json!({ "title": "文本", "bodyMd": "" }), x, y);
+/// 空白处新建文本卡（空正文）并直接进入编辑。
+fn create_text_at(app: &mut App, x: f64, y: f64) -> Task<Message> {
+    match create_text_card_at(app, x, y) {
+        Some(id) => begin_text_edit(app, &id),
+        None => Task::none(),
+    }
 }
 
 /// 落点网格取整建卡并选中（尺寸按类型缺省回落）。
-fn create_card_at(app: &mut App, node_type: &str, data: Value, x: f64, y: f64) {
-    let Some(s) = app.canvas.as_mut() else { return };
+/// 在空白落点建卡（网格取整、选中、置脏）；返回节点 id。
+fn create_card_at(app: &mut App, node_type: &str, data: Value, x: f64, y: f64) -> Option<String> {
+    let s = app.canvas.as_mut()?;
     push_undo(s);
     let node = CanvasFileNode {
         id: chat_actions::uuid_v4(),
@@ -1760,12 +1896,74 @@ fn create_card_at(app: &mut App, node_type: &str, data: Value, x: f64, y: f64) {
     };
     let id = node.id.clone();
     s.data.nodes.push(node);
-    s.view.selection = vec![id];
+    s.view.selection = vec![id.clone()];
+    s.view.selected_edge = None;
     s.touch();
     if node_type == "conversation" {
         // 新对话卡运行态即时对齐（否则输入面要等下一条画布消息才出现）
         crate::canvas_chat::sync_card_chats(app);
     }
+    Some(id)
+}
+
+/// 该拖线是否已是同向同句柄的边（是则重复拖线视为无操作）。
+fn edge_identical(
+    s: &CanvasSession,
+    source: &str,
+    source_side: &str,
+    target: &str,
+    target_side: &str,
+    association: bool,
+) -> bool {
+    let (sh, th) = (format!("{source_side}-source"), format!("{target_side}-target"));
+    let existing = s.data.edges.iter().find(|e| {
+        e.source == source && e.target == target && association == (e.directed == Some(false))
+    });
+    existing.is_some_and(|e| {
+        e.source_handle.as_deref() == Some(sh.as_str()) && e.target_handle.as_deref() == Some(th.as_str())
+    })
+}
+
+/// 反转连线方向：source / target 交换，两端句柄按新几何重算（按原句柄反推会让曲线绕远）。
+fn reverse_edge(app: &mut App, edge_id: &str) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    let Some(pos) = s.data.edges.iter().position(|e| e.id == edge_id) else { return };
+    if s.data.edges[pos].source == s.data.edges[pos].target {
+        return;
+    }
+    push_undo(s);
+    {
+        let e = &mut s.data.edges[pos];
+        std::mem::swap(&mut e.source, &mut e.target);
+    }
+    let (source, target) = {
+        let e = &s.data.edges[pos];
+        (e.source.clone(), e.target.clone())
+    };
+    let (ss, ts) = (
+        crate::canvas_view::side_toward(&s.data, &source, &target),
+        crate::canvas_view::side_toward(&s.data, &target, &source),
+    );
+    {
+        let e = &mut s.data.edges[pos];
+        e.source_handle = Some(format!("{ss}-source"));
+        e.target_handle = Some(format!("{ts}-target"));
+    }
+    s.touch();
+}
+
+/// 切换连线语义：数据流（有向，单箭头）↔ 关联（无向，无箭头）。
+fn toggle_edge_kind(app: &mut App, edge_id: &str) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    let Some(pos) = s.data.edges.iter().position(|e| e.id == edge_id) else { return };
+    push_undo(s);
+    let e = &mut s.data.edges[pos];
+    e.directed = if e.directed == Some(false) { None } else { Some(false) };
+    if e.directed != Some(false) {
+        // 回到数据流时清掉关联边模式（linkMode 只对关联边有意义）
+        e.link_mode = None;
+    }
+    s.touch();
 }
 
 /// 分组改色（data.color = "1"-"6"）。
@@ -1781,6 +1979,30 @@ fn set_group_color(app: &mut App, node_id: &str, index: usize) {
         return;
     };
     // 点当前同色 = 无变化：不压撤销单元、不置脏
+    if node.data.get("color").and_then(Value::as_str) == Some(next.as_str()) {
+        return;
+    }
+    push_undo(s);
+    if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == node_id) {
+        if let Some(obj) = n.data.as_object_mut() {
+            obj.insert("color".into(), Value::String(next));
+        }
+    }
+    s.touch();
+}
+
+/// 文本卡改色（data.color = "1"-"6"；画布内文本卡可整体删色）。
+fn set_text_color(app: &mut App, node_id: &str, index: usize) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    let next = index.to_string();
+    let Some(node) = s
+        .data
+        .nodes
+        .iter()
+        .find(|n| n.id == node_id && n.node_type == "text")
+    else {
+        return;
+    };
     if node.data.get("color").and_then(Value::as_str) == Some(next.as_str()) {
         return;
     }
@@ -1886,6 +2108,244 @@ fn group_rename_commit(app: &mut App, node: String, name: String) {
     }
     s.view.group_rename = None;
     s.touch();
+}
+
+// ===== 文本卡就地编辑与思维导图快捷建卡 =====
+
+/// 快捷建卡与父卡的间距（世界坐标；子卡向右、平级卡向下）。
+const QUICK_GAP: f64 = 80.0;
+
+/// 在空白落点建一张空文本卡（沿用文本卡缺省尺寸、网格取整、选中、置脏）；返回节点 id。
+fn create_text_card_at(app: &mut App, x: f64, y: f64) -> Option<String> {
+    create_card_at(app, "text", json!({ "bodyMd": "" }), x, y)
+}
+
+/// 进入文本卡就地编辑（正文为空也从零可写；引用笔记的文本卡不进编辑态）。
+fn begin_text_edit(app: &mut App, id: &str) -> Task<Message> {
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    let Some(n) = s.data.nodes.iter().find(|n| n.id == id) else { return Task::none() };
+    if n.node_type != "text" || n.data.get("file").is_some() {
+        return Task::none();
+    }
+    let body = n.data.get("bodyMd").and_then(Value::as_str).unwrap_or("").to_string();
+    s.view.editing = Some(TextEditor {
+        node: id.to_string(),
+        content: text_editor::Content::with_text(&body),
+    });
+    s.view.selection = vec![id.to_string()];
+    s.view.selected_edge = None;
+    s.redraw();
+    iced::widget::operation::focus(crate::canvas_view::text_card_editor_id(id))
+}
+
+/// 退出文本卡编辑：正文已逐次写回节点，这里只重建只读渲染缓存。
+fn end_text_edit(app: &mut App) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    close_text_edit(s);
+}
+
+/// 点击 / 选连线 / 撤销等隐式出口收起编辑：同样要按最新正文重建只读缓存，
+/// 否则卡体继续画编辑前的旧文档。
+fn close_text_edit(s: &mut CanvasSession) {
+    if s.view.editing.take().is_some() {
+        rebuild_text_docs(s);
+        s.redraw();
+    }
+}
+
+/// 文本卡编辑动作：文本变更逐次写回节点 `bodyMd`（重绘与保存防抖走 `touch`）。
+/// 节点已被远端补丁删掉时退出编辑，不留一个无落点的编辑器。
+fn on_text_edit(app: &mut App, action: text_editor::Action) -> Task<Message> {
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    let Some(editor) = s.view.editing.as_mut() else { return Task::none() };
+    let node_id = editor.node.clone();
+    editor.content.perform(action);
+    let body = editor.content.text();
+    let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == node_id) else {
+        s.view.editing = None;
+        rebuild_text_docs(s);
+        s.redraw();
+        return Task::none();
+    };
+    let changed = n.data.get("bodyMd").and_then(Value::as_str).unwrap_or("") != body;
+    if !changed {
+        return Task::none();
+    }
+    if let Some(obj) = n.data.as_object_mut() {
+        obj.insert("bodyMd".into(), Value::String(body));
+    }
+    s.touch();
+    Task::none()
+}
+
+/// 文本卡「保存为笔记」：弹系统目录选择器，在仓库内新建唯一命名的 `.md`，成功后卡转引用。
+/// 取消不留落盘；越界 / 写入失败只报错，卡仍保留正文（bodyMd 不删）。
+fn save_as_note(app: &mut App, node_id: &str) -> Task<Message> {
+    if matches!(app.repo_kind, RepoKind::Space(_)) {
+        app.notify(crate::NoticeLevel::Warning, "协作空间画布暂不支持保存为笔记");
+        return Task::none();
+    }
+    let Some(s) = app.canvas.as_ref() else { return Task::none() };
+    let file = s.file.clone();
+    let Some(n) = s.data.nodes.iter().find(|n| n.id == node_id) else { return Task::none() };
+    if n.node_type != "text" || n.data.get("file").is_some() {
+        return Task::none();
+    }
+    let body = n.data.get("bodyMd").and_then(Value::as_str).unwrap_or_default().to_string();
+    if body.trim().is_empty() {
+        app.notify(crate::NoticeLevel::Warning, "正文为空，先在卡上写点内容");
+        return Task::none();
+    }
+    let title = crate::canvas_view::text_card_title(n);
+    let root = match app.vault.root() {
+        Ok(root) => root,
+        Err(e) => {
+            app.notify(crate::NoticeLevel::Error, format!("无法定位仓库目录：{e}"));
+            return Task::none();
+        }
+    };
+    let node = node_id.to_string();
+    Task::perform(
+        async move { write_note_file(root, title, body).await },
+        move |r| {
+            let (rel, result) = match r {
+                Ok(Some(rel)) => (rel, Ok(())),
+                Ok(None) => (String::new(), Ok(())),
+                Err(e) => (String::new(), Err(e)),
+            };
+            Message::Canvas(CanvasMsg::NoteSaved { file: file.clone(), node: node.clone(), rel, result })
+        },
+    )
+}
+
+/// 目录选择器 → 仓库内写 `<标题>.md`（同名按 `-2`、`-3` 让位）；返回相对路径，None = 取消。
+async fn write_note_file(
+    root: std::path::PathBuf,
+    title: String,
+    body: String,
+) -> Result<Option<String>, String> {
+    let Some(dir) = rfd::AsyncFileDialog::new()
+        .set_title("选择笔记保存位置")
+        .pick_folder()
+        .await
+    else {
+        return Ok(None);
+    };
+    let rel_dir = vault::relative_to_root(&root, dir.path())?;
+    let stem = {
+        let t = title.trim();
+        let t = t.strip_suffix(".md").unwrap_or(t);
+        let s = vault::sanitize_filename(t);
+        if s.is_empty() { "文本卡".to_string() } else { s }
+    };
+    let mut seq = 1usize;
+    let rel = loop {
+        let candidate = if seq == 1 { format!("{stem}.md") } else { format!("{stem}-{seq}.md") };
+        let rel = if rel_dir.is_empty() { candidate } else { format!("{rel_dir}/{candidate}") };
+        if !vault::safe_join(&root, &rel, false)?.exists() {
+            break rel;
+        }
+        seq += 1;
+    };
+    let path = vault::safe_join(&root, &rel, false)?;
+    vault::atomic_write(&path, &body)?;
+    Ok(Some(rel))
+}
+
+/// 笔记落盘回执：仍停留在同一画布才把卡转成引用（否则只提示，磁盘文件已写成）。
+fn on_note_saved(
+    app: &mut App,
+    file: &str,
+    node_id: &str,
+    rel: &str,
+    result: Result<(), String>,
+) -> Task<Message> {
+    if let Err(e) = result {
+        // 写盘失败一律可见（切走画布也留提示），卡状态不变
+        app.notify(crate::NoticeLevel::Error, format!("保存笔记失败：{e}"));
+        return Task::none();
+    }
+    // 取消（rel 空）不留任何提示
+    if rel.is_empty() {
+        return Task::none();
+    }
+    let on_same_canvas = app.canvas.as_ref().is_some_and(|s| s.file == file);
+    if !on_same_canvas {
+        app.notify(crate::NoticeLevel::Info, format!("笔记已保存到 {rel}（当前画布已切换）"));
+        return Task::done(Message::FileTreeRefresh);
+    }
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    let Some(n) = s.data.nodes.iter().find(|n| n.id == node_id) else { return Task::none() };
+    if n.data.get("file").is_some() {
+        return Task::done(Message::FileTreeRefresh);
+    }
+    let body = n.data.get("bodyMd").and_then(Value::as_str).unwrap_or_default().to_string();
+    push_undo(s);
+    if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == node_id) {
+        if let Some(obj) = n.data.as_object_mut() {
+            obj.insert("file".into(), Value::String(rel.to_string()));
+        }
+    }
+    // 卡内渲染切到引用口径：正文就是刚写的这份，不重读磁盘
+    s.view.refs.insert(rel.to_string(), RefContent::Text(body));
+    rebuild_text_docs(s);
+    s.touch();
+    app.notify(crate::NoticeLevel::Success, format!("已保存为笔记：{rel}"));
+    Task::done(Message::FileTreeRefresh)
+}
+
+/// 思维导图键流建卡：Tab = 选中卡的子卡（右侧），Enter = 平级卡（下方，接同一父）；
+/// 新卡落在空白处、与父卡连线并立即进入编辑。
+fn quick_add(app: &mut App, child: bool) -> Task<Message> {
+    let Some((anchor, ax, ay, aw, ah)) = app.canvas.as_ref().and_then(|s| {
+        s.view.selection.iter().find_map(|id| {
+            s.data
+                .nodes
+                .iter()
+                .find(|n| &n.id == id && n.node_type != "group")
+                .map(|n| {
+                    let (w, h) = display_size(n);
+                    (n.id.clone(), n.x, n.y, w, h)
+                })
+        })
+    }) else {
+        return Task::none();
+    };
+    // 平级卡的父 = 指向锚点的那条有向边的来源（没有就接锚点自身）
+    let parent = if child {
+        anchor.clone()
+    } else {
+        app.canvas
+            .as_ref()
+            .and_then(|s| {
+                s.data
+                    .edges
+                    .iter()
+                    .find(|e| e.target == anchor && e.directed != Some(false) && e.source != anchor)
+                    .map(|e| e.source.clone())
+            })
+            .unwrap_or_else(|| anchor.clone())
+    };
+    let start = if child {
+        (ax + aw + QUICK_GAP, ay)
+    } else {
+        (ax, ay + ah + QUICK_GAP)
+    };
+    let size = crate::canvas_view::default_size("text");
+    let (sx, sy) = app
+        .canvas
+        .as_ref()
+        .map(|s| crate::canvas_view::find_free_spot(&s.data.nodes, start, size, 24.0))
+        .unwrap_or(start);
+    let Some(id) = create_text_card_at(app, sx, sy) else { return Task::none() };
+    // 新卡与父卡相连（子卡 = 锚点，平级卡 = 同一父 / 无父即锚点）
+    if let Some(s) = app.canvas.as_mut() {
+        let source_side = crate::canvas_view::side_toward(&s.data, &id, &parent);
+        let target_side = crate::canvas_view::side_toward(&s.data, &parent, &id);
+        crate::canvas_view::connect(&mut s.data, &parent, source_side, &id, target_side, false);
+        s.touch();
+    }
+    begin_text_edit(app, &id)
 }
 
 #[cfg(test)]

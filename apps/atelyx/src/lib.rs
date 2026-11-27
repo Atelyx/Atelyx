@@ -2936,7 +2936,21 @@ impl App {
             | Message::CopyText(..)
             | Message::NoteTitleRenameStart(..)
             | Message::SaveErrorDismiss => self.handle_note(message),
-            Message::Props(m) => self.handle_props(m),
+            Message::Props(m) => {
+                // 画布前台（属性槽未在编辑）时 Tab = 建子卡并连线；其余情况 Tab 仍归属性槽移动
+                if self.props.editing.is_none()
+                    && self.rename.is_none()
+                    && canvas_actions::key_ready(self)
+                    && !self.canvas_keys_yield()
+                {
+                    if let properties_view::PropsMsg::CommitMove(_) = m {
+                        return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
+                            crate::canvas_view::CanvasKey::AddChild,
+                        )));
+                    }
+                }
+                self.handle_props(m)
+            }
             Message::SearchInput(..)
             | Message::SearchClear => self.handle_search(message),
             Message::HistoryLoaded(..)
@@ -4126,6 +4140,17 @@ impl App {
                 }
             }
             Message::EnterKey => {
+                // 画布前台（无可编辑输入面）时 Enter = 建平级卡并连线（思维导图键盘流）
+                if self.wiki_picker.is_none()
+                    && self.props.editing.is_none()
+                    && self.rename.is_none()
+                    && canvas_actions::key_ready(self)
+                    && !self.canvas_keys_yield()
+                {
+                    return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
+                        crate::canvas_view::CanvasKey::AddSibling,
+                    )));
+                }
                 // 双链候选：仅按过 ↑↓ 时 Enter 选中（未按过则照常换行，避免把正在敲的 `[[名` 吃掉）。
                 // 编辑面持键盘时 Enter 被部件捕获（走 Editor Newline），这里是源码档 / 无编辑面时的兜底
                 if self.wiki_picker.as_ref().is_some_and(|p| p.armed) {
@@ -6012,10 +6037,16 @@ impl App {
                         s.view.selection = None;
                     }
                     space_actions::table_collab_sync(self);
+                } else if layout_view::window_shows_canvas(self, window)
+                    && self.canvas.as_ref().is_some_and(|s| s.view.editing.is_some())
+                {
+                    // 文本卡编辑 Esc = 退出编辑（正文已逐次写回）
+                    return canvas_actions::on_msg(self, crate::canvas_view::CanvasMsg::EditText(None));
                 } else if layout_view::window_shows_canvas(self, window) {
                     // 画布 Esc = 清选中（拖拽会话随松手自然收口）
                     if let Some(s) = &mut self.canvas {
                         s.view.selection.clear();
+                        s.view.selected_edge = None;
                         s.view.guides.clear();
                         s.redraw();
                     }

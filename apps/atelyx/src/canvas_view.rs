@@ -15,7 +15,7 @@ use iced::event::Event;
 use iced::widget::canvas::{
     self, Canvas, Frame, LineDash, Path, Stroke, Text as CanvasText,
 };
-use iced::widget::{column, container, responsive, row, space, stack};
+use iced::widget::{column, container, responsive, row, space, stack, text_editor};
 use iced::{alignment, Color, Length, Padding, Point, Rectangle, Size, Vector};
 use serde_json::Value;
 
@@ -92,9 +92,14 @@ pub(crate) const UNDO_DEPTH: usize = 50;
 pub(crate) const MINIMAP_W: f32 = 180.0;
 pub(crate) const MINIMAP_H: f32 = 120.0;
 const MINIMAP_MARGIN: f32 = 12.0;
-/// 连接点命中容差与绘制半径（屏幕像素；容差按缩放反推世界空间）。
-const LINK_HIT_TOL: f32 = 6.0;
-const LINK_DOT_R: f32 = 4.5;
+/// 连接点（四边中点）绘制半径与命中容差（屏幕像素；容差按缩放反推世界空间）。
+const PORT_DOT_R: f32 = 4.5;
+const PORT_HIT_TOL: f32 = 7.0;
+/// 连线命中容差（屏幕像素）与贝塞尔采样段数（采样折线近似曲线距离）。
+const EDGE_HIT_TOL: f32 = 7.0;
+const EDGE_HIT_SAMPLES: usize = 24;
+/// 文本卡底色叠色强度（叠在卡底上的色板色透明度）。
+const TEXT_TINT_A: f32 = 0.16;
 /// 卡头标题起点与右留白（世界坐标，按缩放换算）。
 const CARD_TITLE_X: f32 = 26.0;
 const CARD_TITLE_PAD: f32 = 8.0;
@@ -145,7 +150,8 @@ pub fn world_from_screen(view: &View, x: f32, y: f32) -> (f64, f64) {
 }
 
 /// 卡类型缺省尺寸。
-fn default_size(node_type: &str) -> (f64, f64) {
+/// 卡类型缺省尺寸（磁盘缺 width / height 时回落）。
+pub(crate) fn default_size(node_type: &str) -> (f64, f64) {
     match node_type {
         "conversation" => (520.0, 420.0),
         "table" => (300.0, 110.0),
@@ -494,6 +500,12 @@ pub struct CanvasViewState {
     pub selection: Vec<String>,
     /// 悬停卡 id（连接点只在悬停 / 选中的卡上显形）。
     pub hover: Option<String>,
+    /// 选中连线 id（与卡选中互斥；Delete 优先删边）。
+    pub selected_edge: Option<String>,
+    /// 悬停连线 id（Pointer 光标与强调描边）。
+    pub hover_edge: Option<String>,
+    /// 文本卡就地编辑（节点 id + 编辑器内容；正文逐次写回节点 data）。
+    pub editing: Option<TextEditor>,
     /// 进行中的拖拽会话（平移 / 卡拖动 / resize / 拖线）。
     pub drag: Option<DragState>,
     /// 拖线中的光标屏幕坐标（仅拖线会话使用）。
@@ -539,6 +551,9 @@ impl Default for CanvasViewState {
             fit_pending: false,
             selection: Vec::new(),
             hover: None,
+            selected_edge: None,
+            hover_edge: None,
+            editing: None,
             drag: None,
             link_to: None,
             expanded: HashSet::new(),
@@ -581,8 +596,14 @@ pub enum DragKind {
     Card,
     /// 右下角 resize（松手落盘；仅单选有把手）。
     Resize(String),
-    /// 从卡右侧连接点拖线（松手落在对话卡 = 建引用边）。
-    Link(String),
+    /// 从卡连接点拖线（side = 起手侧；association = Shift 起手的无向关联边）。
+    Link { source: String, side: &'static str, association: bool },
+}
+
+/// 文本卡就地编辑器：内容副本绑定节点 id；退出编辑即丢弃副本（正文逐次写回节点 data）。
+pub struct TextEditor {
+    pub node: String,
+    pub content: text_editor::Content,
 }
 
 /// 撤销单元：节点与连线全量快照。消息内嵌在节点 data 里随快照走（剥离即丢数据）。
@@ -661,19 +682,18 @@ pub fn hit_resize_handle(
     None
 }
 
-/// 右侧连接点命中（仅悬停 / 选中的非分组、非对话卡有连接点；收起组成员不可见不命中）。
-pub fn hit_link_handle(
+/// 连接点命中（四边中点；仅悬停 / 选中的非分组卡显形，收起组成员不可见不命中）。
+/// 返回 (节点 id, 侧名)。
+pub fn hit_link_port(
     canvas: &atelyx_core::vault::CanvasFile,
     hover: Option<&str>,
     selection: &[String],
     zoom: f32,
     world: (f64, f64),
-) -> Option<String> {
-    let tol = LINK_HIT_TOL as f64 / zoom as f64;
+) -> Option<(String, &'static str)> {
+    let tol = PORT_HIT_TOL as f64 / zoom.max(f32::EPSILON) as f64;
     for n in canvas.nodes.iter().rev() {
-        if matches!(n.node_type.as_str(), "group" | "conversation")
-            || hidden_by_collapsed(&canvas.nodes, &n.id)
-        {
+        if n.node_type == "group" || hidden_by_collapsed(&canvas.nodes, &n.id) {
             continue;
         }
         let active = hover == Some(n.id.as_str()) || selection.iter().any(|s| s == &n.id);
@@ -681,9 +701,11 @@ pub fn hit_link_handle(
             continue;
         }
         let (w, h) = display_size(n);
-        let (cx, cy) = (n.x + w, n.y + h / 2.0);
-        if (world.0 - cx).abs() <= tol && (world.1 - cy).abs() <= tol {
-            return Some(n.id.clone());
+        for side in ["right", "left", "top", "bottom"] {
+            let (px, py) = anchor_of(n.x, n.y, w, h, side);
+            if (world.0 - px).abs() <= tol && (world.1 - py).abs() <= tol {
+                return Some((n.id.clone(), side));
+            }
         }
     }
     None
@@ -699,7 +721,7 @@ fn anchor_of(x: f64, y: f64, w: f64, h: f64, side: &str) -> (f64, f64) {
     }
 }
 
-/// 从旧句柄名（如 "right-source" / "left-target"）取侧名；缺失 = None（回落最近侧）。
+/// 从句柄名（如 "right-source" / "left-target"）取侧名；缺失 = None（回落最近侧）。
 fn handle_side(handle: &Option<String>) -> Option<&str> {
     let h = handle.as_deref()?;
     let side = h.split('-').next()?;
@@ -749,6 +771,57 @@ pub fn edge_endpoints(
         anchor_of(n.x, n.y, w, h, &side)
     };
     Some((endpoint(s, t, &e.source_handle), endpoint(t, s, &e.target_handle)))
+}
+
+/// 目标卡面向源卡中心的一侧（拖线落点按它写 targetHandle，边贴着两端之间走）。
+pub fn side_toward(
+    canvas: &atelyx_core::vault::CanvasFile,
+    source: &str,
+    target: &str,
+) -> &'static str {
+    let (Some(s), Some(t)) = (
+        canvas.nodes.iter().find(|n| n.id == source),
+        canvas.nodes.iter().find(|n| n.id == target),
+    ) else {
+        return "left";
+    };
+    let (sw, sh) = display_size(s);
+    let (tw, th) = display_size(t);
+    nearest_side(t.x, t.y, tw, th, (s.x + sw / 2.0, s.y + sh / 2.0))
+}
+
+/// 建一条连线（同向同语义已存在时只更新两端句柄，不叠边）；返回是否新建。
+/// 句柄按端点侧写入磁盘（"right-source" / "left-target" 形态）。
+pub fn connect(
+    canvas: &mut atelyx_core::vault::CanvasFile,
+    source: &str,
+    source_side: &str,
+    target: &str,
+    target_side: &str,
+    association: bool,
+) -> bool {
+    let sh = Some(format!("{source_side}-source"));
+    let th = Some(format!("{target_side}-target"));
+    if let Some(e) = canvas
+        .edges
+        .iter_mut()
+        .find(|e| e.source == source && e.target == target && association == (e.directed == Some(false)))
+    {
+        e.source_handle = sh;
+        e.target_handle = th;
+        return false;
+    }
+    canvas.edges.push(atelyx_core::vault::CanvasFileEdge {
+        id: crate::chat_actions::uuid_v4(),
+        source: source.to_string(),
+        target: target.to_string(),
+        source_handle: sh,
+        target_handle: th,
+        directed: association.then_some(false),
+        link_mode: None,
+        created_at: atelyx_core::vault::now_secs(),
+    });
+    true
 }
 
 /// 连线两端是否都藏在同一收起组内（组内成员互连的边随成员一起隐藏，绘制时整条跳过）。
@@ -899,6 +972,17 @@ pub enum CanvasMsg {
     RefsLoaded(u64, String, HashMap<String, RefRaw>),
     /// 右键菜单动作（菜单按压先关弹层再执行）。
     Menu(CanvasMenuAction),
+    /// 文本卡编辑动作（text_editor 事件；正文逐次写回节点 data）。
+    TextEdit(text_editor::Action),
+    /// 进入 / 退出文本卡就地编辑（None = 退出）。
+    EditText(Option<String>),
+    /// 文本卡「保存为笔记」落盘回执（file = 发起时的画布文件，防切走误写）。
+    NoteSaved {
+        file: String,
+        node: String,
+        rel: String,
+        result: Result<(), String>,
+    },
     /// 粘贴回执（系统剪贴板文本；非画布格式忽略）。
     PasteText(String),
     /// 键盘命令（commands::Scope::Canvas 分派）。
@@ -919,6 +1003,10 @@ pub enum CanvasKey {
     Paste,
     SelectAll,
     DeleteSelection,
+    /// 思维导图：建子卡（右侧，自动连线）。
+    AddChild,
+    /// 思维导图：建平级卡（下方，接同一父；无父则与选中卡相连）。
+    AddSibling,
 }
 
 /// 右键菜单动作。
@@ -936,6 +1024,18 @@ pub enum CanvasMenuAction {
     /// 空白处新建画布内文本卡（正文空，随 `.atlx` 内嵌）。
     CreateTextAt { x: f64, y: f64 },
     GroupColor { node: String, index: usize },
+    /// 文本卡改色（data.color "1"–"6"；便于按主题分色）。
+    TextColor { node: String, index: usize },
+    /// 进入文本卡就地编辑。
+    EditTextCard { node: String },
+    /// 把文本卡正文保存为仓库笔记（弹目录选择器）。
+    SaveAsNote { node: String },
+    /// 删除指定连线。
+    DeleteEdge { edge: String },
+    /// 反转连线方向（两端 id 与句柄一起换）。
+    ReverseEdge { edge: String },
+    /// 切换连线语义：数据流（有向）↔ 关联（无向）。
+    ToggleEdgeKind { edge: String },
     /// 打开分组改名弹层（草稿在会话视图态）。
     GroupRenameStart { node: String },
     GroupRenameCommit { node: String, name: String },
@@ -1019,7 +1119,7 @@ impl canvas::Program<Message> for WorldLayer<'_> {
                         world,
                     )
                     .is_some()
-                        || hit_link_handle(
+                        || hit_link_port(
                             &self.session.data,
                             self.session.view.hover.as_deref(),
                             &self.session.view.selection,
@@ -1134,7 +1234,7 @@ impl canvas::Program<Message> for WorldLayer<'_> {
         if let Some(drag) = &self.session.view.drag {
             return match drag.kind {
                 DragKind::Pan | DragKind::Card => iced::mouse::Interaction::Grabbing,
-                DragKind::Marquee { .. } | DragKind::Link(_) => iced::mouse::Interaction::Crosshair,
+                DragKind::Marquee { .. } | DragKind::Link { .. } => iced::mouse::Interaction::Crosshair,
                 DragKind::Resize(_) => iced::mouse::Interaction::ResizingDiagonallyUp,
             };
         }
@@ -1142,7 +1242,7 @@ impl canvas::Program<Message> for WorldLayer<'_> {
         if hit_resize_handle(&self.session.data, &self.session.view.selection, self.view.zoom, world).is_some() {
             return iced::mouse::Interaction::ResizingDiagonallyUp;
         }
-        if hit_link_handle(
+        if hit_link_port(
             &self.session.data,
             self.session.view.hover.as_deref(),
             &self.session.view.selection,
@@ -1153,8 +1253,18 @@ impl canvas::Program<Message> for WorldLayer<'_> {
         {
             return iced::mouse::Interaction::Crosshair;
         }
-        if hit_card(&self.session.data, world).is_some() {
+        if let Some(i) = hit_card(&self.session.data, world) {
+            // 正文由浮层承载的卡（对话 / 文本卡）：只有卡头是拖动区，正文保持箭头；
+            // 其余卡的整卡体都是拖动区，手形如实反映可拖动范围
+            let n = &self.session.data.nodes[i];
+            let body_overlay = matches!(n.node_type.as_str(), "conversation" | "text");
+            if body_overlay && world.1 > n.y + CARD_HEADER_H as f64 {
+                return iced::mouse::Interaction::default();
+            }
             return iced::mouse::Interaction::Grab;
+        }
+        if hit_edge(&self.session.data, &self.view, (p.x, p.y)).is_some() {
+            return iced::mouse::Interaction::Pointer;
         }
         iced::mouse::Interaction::default()
     }
@@ -1282,11 +1392,29 @@ fn draw_world(
         if !world_rect_visible(view, size, n.x, n.y, w, h, 8.0) {
             continue;
         }
-        let link_handle = session.view.hover.as_deref() == Some(n.id.as_str())
-            || sel.contains(n.id.as_str());
+        let active = session.view.hover.as_deref() == Some(n.id.as_str()) || sel.contains(n.id.as_str());
         // resize 把手仅单选卡（多选不提供批量缩放）
         let resize_handle = sel.contains(n.id.as_str()) && session.view.selection.len() == 1;
-        draw_card(session, view, frame, n, w, h, sel.contains(n.id.as_str()), link_handle, resize_handle);
+        draw_card(session, view, frame, n, w, h, sel.contains(n.id.as_str()), active, resize_handle);
+    }
+
+    // 拖线落点卡高亮（可连目标 = 非分组、非自身）
+    if let Some(DragState { kind: DragKind::Link { source, .. }, .. }) = &session.view.drag {
+        if let Some(to) = session.view.link_to {
+            let world = view.world(to.0, to.1);
+            if let Some(i) = hit_card(&session.data, world) {
+                let t = &session.data.nodes[i];
+                if &t.id != source && t.node_type != "group" {
+                    let (w, h) = session.card_size(t);
+                    let (sx, sy) = view.screen(t.x, t.y);
+                    let rect = rounded_rect(sx - 2.0, sy - 2.0, w as f32 * view.zoom + 4.0, h as f32 * view.zoom + 4.0, CARD_RADIUS * view.zoom);
+                    frame.stroke(
+                        &rect,
+                        Stroke { style: canvas::Style::Solid(pal::ACCENT), width: 2.0, ..Stroke::default() },
+                    );
+                }
+            }
+        }
     }
 
     // 远端在场：对端选中描边与名签、流式生成指示
@@ -1331,18 +1459,19 @@ fn draw_world(
         );
     }
 
-    // 拖线预览：来源卡右缘连接点 → 光标
-    if let Some(DragState { kind: DragKind::Link(source), .. }) = &session.view.drag {
+    // 拖线预览：起手连接点 → 光标
+    if let Some(DragState { kind: DragKind::Link { source, side, association }, .. }) = &session.view.drag {
         if let Some(to) = session.view.link_to {
             if let Some(n) = session.data.nodes.iter().find(|n| &n.id == source) {
                 let (w, h) = session.card_size(n);
-                let (sx, sy) = view.screen(n.x + w, n.y + h / 2.0);
+                let (ax, ay) = anchor_of(n.x, n.y, w, h, side);
+                let (sx, sy) = view.screen(ax, ay);
                 let (tx, ty) = to;
                 let path = Path::line(Point::new(sx, sy), Point::new(tx, ty));
                 frame.stroke(
                     &path,
                     Stroke {
-                        style: canvas::Style::Solid(pal::ACCENT),
+                        style: canvas::Style::Solid(if *association { pal::BORDER_STRONG } else { pal::ACCENT }),
                         width: 1.6,
                         line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 },
                         ..Stroke::default()
@@ -1554,21 +1683,11 @@ fn group_color(v: Option<&str>) -> Color {
 }
 
 /// 连线：数据流（金，虚 = 未消费）与关联（灰，箭头按 linkMode）。
+/// 悬停加粗、选中再加粗并补一圈半透明光晕（卡的选中态同为强调色）。
 fn draw_edge(session: &CanvasSession, view: &View, frame: &mut Frame, e: &atelyx_core::vault::CanvasFileEdge) {
-    let Some(((x0, y0), (x1, y1))) = edge_endpoints(&session.data, e) else {
+    let Some((p0, c0, c1, p1)) = edge_curve(&session.data, view, e) else {
         return;
     };
-    let (p0x, p0y) = view.screen(x0, y0);
-    let (p1x, p1y) = view.screen(x1, y1);
-    let (p0, p1) = (Point::new(p0x, p0y), Point::new(p1x, p1y));
-    // 三次贝塞尔：控制点沿两端各自外向延伸
-    let (dx, dy) = (p1.x - p0.x, p1.y - p0.y);
-    let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-    let ext = (dist / 2.0).min(90.0);
-    let (s_side, t_side) = (edge_side(session, e, true), edge_side(session, e, false));
-    let (s_out, t_out) = (side_normal(s_side), side_normal(t_side));
-    let c0 = Point::new(p0.x + s_out.0 * ext, p0.y + s_out.1 * ext);
-    let c1 = Point::new(p1.x + t_out.0 * ext, p1.y + t_out.1 * ext);
     let path = Path::new(|p| {
         p.move_to(p0);
         p.bezier_curve_to(c0, c1, p1);
@@ -1582,6 +1701,19 @@ fn draw_edge(session: &CanvasSession, view: &View, frame: &mut Frame, e: &atelyx
         EdgeRole::Lineage => (pal::ACCENT, 1.6, false),
         EdgeRole::Flow => (pal::ACCENT, 1.4, false),
     };
+    let selected = session.view.selected_edge.as_deref() == Some(e.id.as_str());
+    let hovered = session.view.hover_edge.as_deref() == Some(e.id.as_str());
+    let width = if selected { 2.6 } else if hovered { width + 0.8 } else { width };
+    if selected || hovered {
+        frame.stroke(
+            &path,
+            Stroke {
+                style: canvas::Style::Solid(iced::Color { a: 0.22, ..pal::ACCENT }),
+                width: width + 3.0,
+                ..Stroke::default()
+            },
+        );
+    }
     frame.stroke(
         &path,
         Stroke {
@@ -1606,30 +1738,40 @@ fn draw_edge(session: &CanvasSession, view: &View, frame: &mut Frame, e: &atelyx
         }
     };
     if arrows >= 1 {
+        let (t_side, s_side) = (edge_side(&session.data, e, false), edge_side(&session.data, e, true));
+        let (t_out, s_out) = (side_normal(t_side), side_normal(s_side));
         draw_arrow(frame, p1, (-t_out.0, -t_out.1), color);
+        if arrows >= 2 {
+            draw_arrow(frame, p0, (-s_out.0, -s_out.1), color);
+        }
     }
-    if arrows >= 2 {
-        draw_arrow(frame, p0, (-s_out.0, -s_out.1), color);
+    // 选中在两端画小方块把手（提示这条边可被删除 / 可拖拽语义）
+    if selected {
+        for p in [p0, p1] {
+            frame.fill(
+                &Path::rectangle(Point::new(p.x - 3.0, p.y - 3.0), Size::new(6.0, 6.0)),
+                pal::ACCENT,
+            );
+        }
     }
 }
 
 /// 连线端所属侧（句柄缺失回落最近侧的再推导）；端点已聚合到收起组边缘时按组取侧。
-fn edge_side(session: &CanvasSession, e: &atelyx_core::vault::CanvasFileEdge, source: bool) -> &'static str {
+fn edge_side(canvas: &atelyx_core::vault::CanvasFile, e: &atelyx_core::vault::CanvasFileEdge, source: bool) -> &'static str {
     let (id, handle) = if source {
         (&e.source, &e.source_handle)
     } else {
         (&e.target, &e.target_handle)
     };
-    let Some(n) = session.data.nodes.iter().find(|n| &n.id == id) else {
+    let Some(n) = canvas.nodes.iter().find(|n| &n.id == id) else {
         return "right";
     };
-    if let Some(gi) = group_of(&session.data.nodes, id) {
-        let g = &session.data.nodes[gi];
+    if let Some(gi) = group_of(&canvas.nodes, id) {
+        let g = &canvas.nodes[gi];
         if group_collapsed(g) {
             let (gw, gh) = display_size(g);
             let other_id = if source { &e.target } else { &e.source };
-            let toward = session
-                .data
+            let toward = canvas
                 .nodes
                 .iter()
                 .find(|n| &n.id == other_id)
@@ -1649,19 +1791,89 @@ fn edge_side(session: &CanvasSession, e: &atelyx_core::vault::CanvasFileEdge, so
             _ => "right",
         };
     }
-    let (w, h) = session.card_size(n);
+    let (w, h) = display_size(n);
     let other_id = if source { &e.target } else { &e.source };
-    let toward = session
-        .data
+    let toward = canvas
         .nodes
         .iter()
         .find(|n| &n.id == other_id)
         .map(|o| {
-            let (ow, oh) = session.card_size(o);
+            let (ow, oh) = display_size(o);
             (o.x + ow / 2.0, o.y + oh / 2.0)
         })
         .unwrap_or((n.x, n.y));
     nearest_side(n.x, n.y, w, h, toward)
+}
+
+/// 连线三次贝塞尔（屏幕坐标）：两端锚点 + 沿各端外向延伸的控制点。
+/// 绘制与命中同源，命中不会与画出的曲线错位。
+pub fn edge_curve(
+    canvas: &atelyx_core::vault::CanvasFile,
+    view: &View,
+    e: &atelyx_core::vault::CanvasFileEdge,
+) -> Option<(Point, Point, Point, Point)> {
+    let ((x0, y0), (x1, y1)) = edge_endpoints(canvas, e)?;
+    let (sx, sy) = view.screen(x0, y0);
+    let (tx, ty) = view.screen(x1, y1);
+    let p0 = Point::new(sx, sy);
+    let p1 = Point::new(tx, ty);
+    let (dx, dy) = (p1.x - p0.x, p1.y - p0.y);
+    let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+    let ext = (dist / 2.0).min(90.0);
+    let (s_side, t_side) = (edge_side(canvas, e, true), edge_side(canvas, e, false));
+    let (s_out, t_out) = (side_normal(s_side), side_normal(t_side));
+    let c0 = Point::new(p0.x + s_out.0 * ext, p0.y + s_out.1 * ext);
+    let c1 = Point::new(p1.x + t_out.0 * ext, p1.y + t_out.1 * ext);
+    Some((p0, c0, c1, p1))
+}
+
+/// 三次贝塞尔取点。
+fn bezier_at(p0: Point, c0: Point, c1: Point, p1: Point, t: f32) -> Point {
+    let u = 1.0 - t;
+    let (u2, t2) = (u * u, t * t);
+    let (u3, t3) = (u2 * u, t2 * t);
+    Point::new(
+        u3 * p0.x + 3.0 * u2 * t * c0.x + 3.0 * u * t2 * c1.x + t3 * p1.x,
+        u3 * p0.y + 3.0 * u2 * t * c0.y + 3.0 * u * t2 * c1.y + t3 * p1.y,
+    )
+}
+
+/// 点到线段距离（屏幕像素）。
+fn point_segment_dist(p: (f32, f32), a: Point, b: Point) -> f32 {
+    let (abx, aby) = (b.x - a.x, b.y - a.y);
+    let (apx, apy) = (p.0 - a.x, p.1 - a.y);
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 <= f32::EPSILON { 0.0 } else { ((apx * abx + apy * aby) / len2).clamp(0.0, 1.0) };
+    let (cx, cy) = (a.x + abx * t, a.y + aby * t);
+    ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
+}
+
+/// 连线命中：沿贝塞尔采样折线取与光标的最近屏幕距离（容差 `EDGE_HIT_TOL`）；
+/// 同组收起的边不参与（不可见）。
+pub fn hit_edge(
+    canvas: &atelyx_core::vault::CanvasFile,
+    view: &View,
+    at: (f32, f32),
+) -> Option<String> {
+    let mut best: Option<(f32, String)> = None;
+    for e in canvas.edges.iter().rev() {
+        if edge_hidden(canvas, e) {
+            continue;
+        }
+        let Some((p0, c0, c1, p1)) = edge_curve(canvas, view, e) else { continue };
+        let mut prev = p0;
+        let mut min = f32::INFINITY;
+        for i in 1..=EDGE_HIT_SAMPLES {
+            let t = i as f32 / EDGE_HIT_SAMPLES as f32;
+            let cur = bezier_at(p0, c0, c1, p1, t);
+            min = min.min(point_segment_dist(at, prev, cur));
+            prev = cur;
+        }
+        if min <= EDGE_HIT_TOL && best.as_ref().is_none_or(|(d, _)| min < *d) {
+            best = Some((min, e.id.clone()));
+        }
+    }
+    best.map(|(_, id)| id)
 }
 
 /// 侧外向法线（世界方向，屏幕同向）。
@@ -1704,7 +1916,7 @@ fn draw_card(
     w: f64,
     h: f64,
     selected: bool,
-    link_handle: bool,
+    ports: bool,
     resize_handle: bool,
 ) {
     let (sx, sy) = view.screen(n.x, n.y);
@@ -1715,8 +1927,13 @@ fn draw_card(
     let (icon_name, title) = card_head(n);
     let z = view.zoom;
 
-    // 框体
+    // 框体（文本卡卡按 data.color 叠一层浅色：仅色相区分，不压正文对比度）
     frame.fill(&rounded_rect(sx, sy, sw, sh, CARD_RADIUS * z), pal::BG_SECONDARY);
+    if n.node_type == "text" {
+        if let Some(color) = card_tint(n) {
+            frame.fill(&rounded_rect(sx, sy, sw, sh, CARD_RADIUS * z), iced::Color { a: TEXT_TINT_A, ..color });
+        }
+    }
 
     // 头部条（异常小高度按卡高钳制，标题不得画到卡外）
     let head_h = (CARD_HEADER_H * z).min(sh);
@@ -1790,17 +2007,41 @@ fn draw_card(
             pal::ACCENT,
         );
     }
-    // 拖线连接点（右侧中点；悬停 / 选中的资产卡显形）
-    if link_handle && n.node_type != "conversation" {
-        frame.fill(
-            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), LINK_DOT_R),
-            pal::ACCENT,
-        );
-        frame.stroke(
-            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), LINK_DOT_R),
-            Stroke { style: canvas::Style::Solid(pal::BG_SECONDARY), width: 1.5, ..Stroke::default() },
-        );
+    // 拖线连接点（四边中点；悬停 / 选中的卡显形，任意卡都可作为连线起止）
+    if ports {
+        for side in ["left", "right", "top", "bottom"] {
+            let (px, py) = anchor_of(n.x, n.y, w, h, side);
+            let (cx, cy) = view.screen(px, py);
+            let dot = Path::circle(Point::new(cx, cy), PORT_DOT_R);
+            frame.fill(&dot, pal::ACCENT);
+            frame.stroke(
+                &dot,
+                Stroke { style: canvas::Style::Solid(pal::BG_SECONDARY), width: 1.5, ..Stroke::default() },
+            );
+        }
     }
+}
+
+/// 文本卡卡色板色（data.color "1"-"6"；缺省 / 越界 = 无叠色）。
+fn card_tint(n: &atelyx_core::vault::CanvasFileNode) -> Option<Color> {
+    let v = n.data.get("color").and_then(Value::as_str)?;
+    let i = v.parse::<usize>().ok()?.checked_sub(1)?;
+    pal::CANVAS_GROUP_COLORS.get(i).copied()
+}
+
+/// 文本卡标题：显式 title > 正文首个非空行（去 `#` 前缀）；都空 = 「文本」。
+pub(crate) fn text_card_title(n: &atelyx_core::vault::CanvasFileNode) -> String {
+    if let Some(t) = n.data.get("title").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()) {
+        return t.to_string();
+    }
+    let first = n
+        .data
+        .get("bodyMd")
+        .and_then(Value::as_str)
+        .and_then(|b| b.lines().find(|l| !l.trim().is_empty()))
+        .map(|l| l.trim().trim_start_matches('#').trim())
+        .filter(|l| !l.is_empty());
+    first.unwrap_or("文本").to_string()
 }
 
 /// 卡类型 → 用户可见名称（属性面板等界面文案）。
@@ -1822,7 +2063,7 @@ fn card_head(n: &atelyx_core::vault::CanvasFileNode) -> (&'static str, String) {
         "conversation" => ("message-square", crate::canvas_chat::card_title(n)),
         "text" => match n.data.get("file").and_then(Value::as_str) {
             Some(f) => ("sticky-note", file_title(f)),
-            None => ("align-left", n.data.get("title").and_then(Value::as_str).unwrap_or("文本").to_string()),
+            None => ("align-left", text_card_title(n)),
         },
         "media" => (
             "image",
@@ -1878,7 +2119,11 @@ fn draw_card_body(
                 Some(Some(RefContent::Image { .. } | RefContent::Table { .. })) => ("引用内容非文本", pal::TEXT_MUTED),
                 Some(Some(RefContent::BrokenImage)) => ("图片无法解码", pal::DANGER),
                 Some(None) => ("加载中…", pal::TEXT_MUTED),
-                _ => ("（空）", pal::TEXT_MUTED),
+                // 画布内空文本卡：提示落笔路径（编辑中由编辑器承载，不再叠提示）
+                _ => {
+                    let editing = session.view.editing.as_ref().is_some_and(|e| e.node == n.id);
+                    (if editing { "" } else { "双击输入内容" }, pal::TEXT_MUTED)
+                }
             };
             draw_hint(frame, hint, area, size, color);
         }
@@ -2182,21 +2427,30 @@ fn card_overlays<'a>(
         // 动态增删层会让后续卡的滚动位置串到别的卡上（收起分组的隐藏成员同此槽位处理）
         let hidden = hidden_by_collapsed(&session.data.nodes, &n.id) && !session.is_dragged(&n.id);
         let offscreen = hidden || sx + sw < 0.0 || sy + sh < 0.0 || sx > vw || sy > vh;
+        let editing = session
+            .view
+            .editing
+            .as_ref()
+            .filter(|e| e.node == n.id)
+            .map(|e| &e.content);
         let inner: Option<Element<'a>> = if offscreen || header_only(sw) {
             None
         } else {
             match n.node_type.as_str() {
                 "conversation" => conversation_card_overlay(app, session, n, view.zoom, window),
-                "text" => session.view.text_docs.get(&n.id).map(|doc| {
-                    // 正文复用笔记只读渲染，字号按视口缩放等比例（原生控件无整体缩放能力）
-                    crate::markdown_view::document_body_scaled(
-                        doc,
-                        &app.theme,
-                        &app.note_images,
-                        app.global.soft_wrap,
-                        view.zoom,
-                    )
-                }),
+                "text" => match editing {
+                    Some(content) => Some(text_card_editor(&n.id, content, view.zoom)),
+                    None => session.view.text_docs.get(&n.id).map(|doc| {
+                        // 正文复用笔记只读渲染，字号按视口缩放等比例（原生控件无整体缩放能力）
+                        crate::markdown_view::document_body_scaled(
+                            doc,
+                            &app.theme,
+                            &app.note_images,
+                            app.global.soft_wrap,
+                            view.zoom,
+                        )
+                    }),
+                },
                 _ => None,
             }
         };
@@ -2206,8 +2460,11 @@ fn card_overlays<'a>(
                     .width(Length::Fill)
                     .padding(Padding::ZERO.right(4.0 * view.zoom));
                 // 对话卡自带消息滚动区与固定输入行，外层不能再包滚动（否则输入行随正文滚走、
-                // 回底命令打到被压缩的内层）；文本卡由外层滚动承载整篇正文。
-                let body: Element<'_> = if n.node_type == "conversation" {
+                // 回底命令打到被压缩的内层）；文本卡编辑中的 text_editor 自带滚动，同理；
+                // 只读文本卡由外层滚动承载整篇正文。
+                let body: Element<'_> = if n.node_type == "conversation"
+                    || (n.node_type == "text" && session.view.editing.as_ref().is_some_and(|e| e.node == n.id))
+                {
                     content.height(Length::Fill).into()
                 } else {
                     scroll::v_scaled(content, view.zoom)
@@ -2271,6 +2528,30 @@ fn place_card_overlay<'a>(
         Size::new((sw - pad).max(0.0), (sh - top - bottom).max(0.0)),
     )
     .into()
+}
+
+/// 文本卡编辑器部件 id（按节点稳定；进入编辑时按它聚焦）。
+pub fn text_card_editor_id(node: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("canvas-note-editor:{node}"))
+}
+
+/// 文本卡就地编辑器：透明底、无边框（卡体自绘承担底色与描边），字号随视口缩放。
+fn text_card_editor<'a>(node: &'a str, content: &'a text_editor::Content, zoom: f32) -> Element<'a> {
+    text_editor(content)
+        .id(text_card_editor_id(node))
+        .size(pal::fs_body() * zoom)
+        .font(crate::ui::regular())
+        .padding(Padding::ZERO)
+        .height(Length::Fill)
+        .on_action(|a| Message::Canvas(CanvasMsg::TextEdit(a)))
+        .style(|_t, _s| text_editor::Style {
+            background: iced::Background::Color(Color::TRANSPARENT),
+            border: iced::border::Border::default(),
+            placeholder: pal::TEXT_MUTED,
+            value: pal::TEXT_PRIMARY,
+            selection: pal::SELECTION,
+        })
+        .into()
 }
 
 /// 对话卡浮层：消息流（只读渲染段 + 操作行）+ # 候选 / 附件托盘 / 输入行。
@@ -3268,30 +3549,110 @@ mod tests {
         assert!(spot.1 >= 220.0);
     }
 
+    /// 连接点：四边中点；仅悬停 / 选中的非分组卡命中（对话卡也可起线，任意卡都能连）。
     #[test]
-    fn link_handle_only_on_hovered_or_selected_asset() {
+    fn link_port_hits_four_sides_of_active_card() {
         let c = canvas(
             vec![
                 node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
                 node("conv", "conversation", 200.0, 0.0, Some(100.0), Some(100.0)),
+                node("g", "group", 400.0, 0.0, Some(100.0), Some(100.0)),
             ],
             vec![],
         );
-        let at = (100.0, 50.0);
         // 未悬停 / 未选中：无连接点
-        assert_eq!(hit_link_handle(&c, None, &[], 1.0, at), None);
-        // 悬停命中
-        assert_eq!(hit_link_handle(&c, Some("a"), &[], 1.0, at).as_deref(), Some("a"));
-        // 选中也可命中
+        assert_eq!(hit_link_port(&c, None, &[], 1.0, (100.0, 50.0)), None);
+        // 悬停命中右侧；左 / 上 / 下同样命中
         assert_eq!(
-            hit_link_handle(&c, None, &["a".to_string()], 1.0, at).as_deref(),
-            Some("a")
+            hit_link_port(&c, Some("a"), &[], 1.0, (100.0, 50.0)),
+            Some(("a".into(), "right"))
         );
-        // 对话卡没有连接点（只有资产卡可作引用来源）
         assert_eq!(
-            hit_link_handle(&c, Some("conv"), &[], 1.0, (300.0, 50.0)),
-            None
+            hit_link_port(&c, Some("a"), &[], 1.0, (0.0, 50.0)),
+            Some(("a".into(), "left"))
         );
+        assert_eq!(
+            hit_link_port(&c, Some("a"), &[], 1.0, (50.0, 0.0)),
+            Some(("a".into(), "top"))
+        );
+        assert_eq!(
+            hit_link_port(&c, Some("a"), &[], 1.0, (50.0, 100.0)),
+            Some(("a".into(), "bottom"))
+        );
+        // 选中也可命中；对话卡有连接点；分组没有
+        assert_eq!(
+            hit_link_port(&c, None, &["a".to_string()], 1.0, (100.0, 50.0)),
+            Some(("a".into(), "right"))
+        );
+        assert_eq!(
+            hit_link_port(&c, Some("conv"), &[], 1.0, (200.0, 50.0)),
+            Some(("conv".into(), "left"))
+        );
+        assert_eq!(hit_link_port(&c, Some("g"), &[], 1.0, (400.0, 50.0)), None);
+    }
+
+    /// 连线命中：画出的贝塞尔附近可点中；远处不命中；同组收起的边不可见不命中。
+    #[test]
+    fn edge_hit_follows_drawn_curve() {
+        let c = canvas(
+            vec![
+                node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+                node("b", "text", 260.0, 0.0, Some(100.0), Some(100.0)),
+            ],
+            vec![edge("e", "a", "b")],
+        );
+        let view = View { zoom: 1.0, pan: (0.0, 0.0) };
+        // 两端锚点中点（贝塞尔在对称布局下过中点附近）
+        assert_eq!(hit_edge(&c, &view, (160.0, 50.0)), Some("e".into()));
+        // 远离曲线
+        assert_eq!(hit_edge(&c, &view, (160.0, 500.0)), None);
+        // 同组收起：边不可见，不命中
+        let mut g = node("g", "group", -20.0, -20.0, Some(420.0), Some(200.0));
+        g.data = json!({ "collapsed": true });
+        let c2 = canvas(
+            vec![
+                node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+                node("b", "text", 260.0, 0.0, Some(100.0), Some(100.0)),
+                g,
+            ],
+            vec![edge("e", "a", "b")],
+        );
+        assert_eq!(hit_edge(&c2, &view, (160.0, 50.0)), None);
+    }
+
+    /// 建边幂等：同向重复拖线只更新句柄不叠边；Shift 关联边是无向的第二条。
+    #[test]
+    fn connect_is_idempotent_and_keeps_semantics() {
+        let mut c = canvas(
+            vec![
+                node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+                node("b", "text", 260.0, 0.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        assert!(connect(&mut c, "a", "right", "b", "left", false));
+        assert!(!connect(&mut c, "a", "top", "b", "top", false));
+        assert_eq!(c.edges.len(), 1);
+        assert_eq!(c.edges[0].source_handle.as_deref(), Some("top-source"));
+        // 关联边与数据流边是两种语义，各自独立存在
+        assert!(connect(&mut c, "a", "right", "b", "left", true));
+        assert_eq!(c.edges.len(), 2);
+        assert_eq!(c.edges[1].directed, Some(false));
+        // 目标卡面向来源卡的一侧（a 在 b 左侧 = a 的右侧朝向 b）
+        assert_eq!(side_toward(&c, "b", "a"), "right");
+        assert_eq!(side_toward(&c, "a", "b"), "left");
+    }
+
+    /// 文本卡标题：显式 title 优先，其次正文首个非空行（去 `#` 前缀），都空回落「文本」。
+    #[test]
+    fn text_card_title_falls_back_to_first_body_line() {
+        let mut n = node("t", "text", 0.0, 0.0, Some(100.0), Some(100.0));
+        n.data = json!({ "bodyMd": "" });
+        assert_eq!(text_card_title(&n), "文本");
+        n.data = json!({ "bodyMd": "\n\n## 头脑风暴\n细节" });
+        assert_eq!(text_card_title(&n), "头脑风暴");
+        n.data = json!({ "title": "显式标题", "bodyMd": "正文行" });
+        assert_eq!(text_card_title(&n), "显式标题");
     }
 
     #[test]
