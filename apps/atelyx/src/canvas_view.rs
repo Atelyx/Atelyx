@@ -1471,7 +1471,7 @@ fn draw_world(
                 frame.stroke(
                     &path,
                     Stroke {
-                        style: canvas::Style::Solid(if *association { pal::BORDER_STRONG } else { pal::ACCENT }),
+                        style: canvas::Style::Solid(if *association { pal::TEXT_PRIMARY } else { pal::ACCENT }),
                         width: 1.6,
                         line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 },
                         ..Stroke::default()
@@ -1682,7 +1682,7 @@ fn group_color(v: Option<&str>) -> Color {
         .unwrap_or(pal::TEXT_MUTED)
 }
 
-/// 连线：数据流（金，虚 = 未消费）与关联（灰，箭头按 linkMode）。
+/// 连线：数据流（金，虚 = 未消费）与关联（白，箭头按 linkMode）。
 /// 悬停加粗、选中再加粗并补一圈半透明光晕（卡的选中态同为强调色）。
 fn draw_edge(session: &CanvasSession, view: &View, frame: &mut Frame, e: &atelyx_core::vault::CanvasFileEdge) {
     let Some((p0, c0, c1, p1)) = edge_curve(&session.data, view, e) else {
@@ -1694,7 +1694,7 @@ fn draw_edge(session: &CanvasSession, view: &View, frame: &mut Frame, e: &atelyx
     });
     let role = edge_role(&session.data, e);
     let (color, width, dash) = match role {
-        EdgeRole::Association => (pal::BORDER_STRONG, 1.2, false),
+        EdgeRole::Association => (pal::TEXT_PRIMARY, 1.7, false),
         // 引用边：未消费虚线 / 已消费实线；产出边恒实线
         EdgeRole::Reference { consumed: false } => (pal::ACCENT, 1.4, true),
         EdgeRole::Reference { consumed: true } => (pal::ACCENT, 1.8, false),
