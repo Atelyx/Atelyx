@@ -187,9 +187,8 @@ fn reorder_by<T>(items: &mut Vec<T>, order: &[String], key: impl Fn(&T) -> &str)
     items.sort_by_key(|item| rank.get(key(item)).copied().unwrap_or(usize::MAX));
 }
 
-/// 文件名净化：非法字符换 `_`、去首尾空白、Windows 保留名与尾点/尾空格补偿
-/// （服务端数据目录可能落在 Windows 盘，与客户端同口径）。
-fn sanitize_filename(title: &str) -> String {
+/// 非法字符换 `_`、去首尾空白。
+fn clean_name(title: &str) -> String {
     let cleaned: String = title
         .chars()
         .map(|c| match c {
@@ -197,20 +196,23 @@ fn sanitize_filename(title: &str) -> String {
             _ => c,
         })
         .collect();
-    let trimmed = cleaned.trim();
-    let stem = trimmed.split('.').next().unwrap_or("");
-    if is_windows_reserved_name(stem) {
-        format!("_{trimmed}")
-    } else if trimmed.ends_with(['.', ' ']) {
-        format!("{trimmed}_")
+    cleaned.trim().to_string()
+}
+
+/// 主名 + 固定扩展名：主名尾部的点原样保留（拼上扩展名后点不再是文件尾，不能按「尾点」补 `_`，
+/// 否则落成 `名字._.md`），保留名按首个点前的名字补 `_` 前缀（与客户端同口径）。
+fn file_name_with_ext(stem: &str, ext: &str) -> String {
+    let stem = clean_name(stem);
+    if is_windows_reserved_name(stem.split('.').next().unwrap_or("")) {
+        format!("_{stem}.{ext}")
     } else {
-        trimmed.to_string()
+        format!("{stem}.{ext}")
     }
 }
 
 /// title 变更后的同目录新相对路径（旧路径取目录前缀 + 净化标题 + 扩展名）。
 fn rel_with_new_title(old_file: &str, new_title: &str, ext: &str) -> String {
-    let filename = format!("{}.{}", sanitize_filename(new_title), ext);
+    let filename = file_name_with_ext(new_title, ext);
     match old_file.rfind('/') {
         Some(i) => format!("{}/{}", &old_file[..i], filename),
         None => filename,
@@ -491,7 +493,7 @@ async fn patch_entity<E: serde::de::DeserializeOwned + Send + 'static, P>(
                 .parent()
                 .ok_or_else(|| bad_request(&format!("非法路径：{}", body_path)))?;
             (
-                parent.join(format!("{}.{}", sanitize_filename((io.entity_title)(&entity)), io.ext)),
+                parent.join(file_name_with_ext((io.entity_title)(&entity), io.ext)),
                 rel_with_new_title(body_path, (io.entity_title)(&entity), io.ext),
             )
         }

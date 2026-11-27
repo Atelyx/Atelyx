@@ -569,8 +569,7 @@ pub fn save_image_to_downloads(file_name: &str, bytes: &[u8]) -> Result<PathBuf,
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(file_name);
-    let base = sanitize_filename(stem);
-    let base = if base.is_empty() { "图片".to_string() } else { base };
+    let base = sanitize_stem(stem).unwrap_or_else(|| "图片".to_string());
     let ext_dotted = format!(".{ext}");
     let name = crate::path::unique_stem(&base, &ext_dotted, |candidate| {
         dir.join(candidate).exists()
@@ -874,9 +873,22 @@ pub(super) fn sync_dir(dir: &Path) {
 pub(super) fn sync_dir(_dir: &Path) {}
 
 /// 文件名净化：替换 `/\:*?"<>|` 为 `_`，
-/// 去首尾空白；Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含任意扩展名）与尾部点/空格
+/// 去首尾空白；Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含任意扩展名）与尾部点
 /// 补 `_` 前缀/后缀避免 I/O 失败（`CON.md`、`foo.` 在 Windows 会被拒绝或截断）。
 pub fn sanitize_filename(title: &str) -> String {
+    let trimmed = clean_name(title);
+    let stem = trimmed.split('.').next().unwrap_or("");
+    if is_windows_reserved_name(stem) {
+        format!("_{trimmed}")
+    } else if trimmed.ends_with('.') {
+        format!("{trimmed}_")
+    } else {
+        trimmed
+    }
+}
+
+/// 字符净化：非法字符换 `_`、去首尾空白。
+fn clean_name(title: &str) -> String {
     let cleaned: String = title
         .chars()
         .map(|c| match c {
@@ -884,15 +896,28 @@ pub fn sanitize_filename(title: &str) -> String {
             _ => c,
         })
         .collect();
-    let trimmed = cleaned.trim();
-    let stem = trimmed.split('.').next().unwrap_or("");
-    if is_windows_reserved_name(stem) {
-        format!("_{}", trimmed)
-    } else if trimmed.ends_with(['.', ' ']) {
-        format!("{}_", trimmed)
-    } else {
-        trimmed.to_string()
+    cleaned.trim().to_string()
+}
+
+/// 主名净化（调用方随后自己拼固定扩展名用这个）：只做字符净化与去首尾空白，尾部的点原样保留
+/// ——拼上扩展名后点不再是文件尾（`名字...` → `名字....md`），不能按「尾点」补 `_`。
+/// 全点主名拼出来是隐藏名（`.md` / `..md`），按无效处理返回 None；
+/// 保留名按首个点前的名字补 `_` 前缀（`con` 加任何扩展名都非法）。
+pub fn sanitize_stem(stem: &str) -> Option<String> {
+    let stem = clean_name(stem);
+    if stem.trim_matches('.').is_empty() {
+        return None;
     }
+    if is_windows_reserved_name(stem.split('.').next().unwrap_or("")) {
+        return Some(format!("_{stem}"));
+    }
+    Some(stem)
+}
+
+/// 主名 + 固定扩展名（不带点）拼成落盘文件名：主名尾部的点原样保留，拼接后点不再是文件尾，
+/// 故不会再触发 [sanitize_filename] 的尾点补偿。净化后为空返回 None。
+pub fn filename_with_ext(stem: &str, ext: &str) -> Option<String> {
+    sanitize_stem(stem).map(|stem| format!("{stem}.{ext}"))
 }
 
 /// 文件名的扩展名（不含点；无扩展名与仅前导点的隐藏名返回 None）。
@@ -952,8 +977,7 @@ pub fn rename_file_name(input: &str, old_name: &str) -> Option<String> {
             if input == file_stem(old_name) {
                 return Some(old_name.to_string());
             }
-            let stem = sanitize_filename(strip_own_extension(input, ext));
-            (!stem.is_empty()).then(|| format!("{stem}.{ext}"))
+            filename_with_ext(strip_own_extension(input, ext), ext)
         }
         None => {
             let name = sanitize_filename(input);
@@ -962,15 +986,19 @@ pub fn rename_file_name(input: &str, old_name: &str) -> Option<String> {
     }
 }
 
-/// 新建草稿名净化：与重命名同口径剥掉手打的同名后缀（新建表格输入「表.atb」不落成
-/// 「表.atb.atb」）。`ext` = 该类条目的扩展名（文件夹为 None）。净化后为空返回 None。
+/// 新建草稿名净化（返回主名，扩展名由调用方拼接）：与重命名同口径剥掉手打的同名后缀
+/// （新建表格输入「表.atb」不落成「表.atb.atb」）。`ext` = 该类条目的扩展名（文件夹为 None）。
+/// 净化后为空返回 None。
 pub fn draft_file_name(input: &str, ext: Option<&str>) -> Option<String> {
     let input = input.trim();
-    let stem = sanitize_filename(match ext {
-        Some(ext) => strip_own_extension(input, ext),
-        None => input,
-    });
-    (!stem.is_empty()).then_some(stem)
+    match ext {
+        // 扩展名随后拼接：尾点/空格按主名口径去掉，否则会落成 `表._.atb`
+        Some(ext) => sanitize_stem(strip_own_extension(input, ext)),
+        None => {
+            let name = sanitize_filename(input);
+            (!name.is_empty()).then_some(name)
+        }
+    }
 }
 
 /// Windows 保留设备名（不带扩展名时同样保留，如 `CON` / `CON.txt` 均非法）。
@@ -1990,7 +2018,7 @@ mod sanitize_filename_tests {
 
 #[cfg(test)]
 mod file_name_tests {
-    use super::{draft_file_name, file_extension, file_stem, rename_file_name};
+    use super::{draft_file_name, file_extension, file_stem, filename_with_ext, rename_file_name};
 
     #[test]
     fn extension_and_stem_split_on_last_dot() {
@@ -2023,6 +2051,24 @@ mod file_name_tests {
         assert_eq!(rename_file_name("表.md", "表.md.md").as_deref(), Some("表.md.md"));
     }
 
+    /// 主名尾部的点原样保留：拼上扩展名后点不再是文件尾，不能再按尾点补 `_`（`名字._.md`）。
+    #[test]
+    fn trailing_dot_stem_survives_extension() {
+        assert_eq!(rename_file_name("笔记.", "笔记.md").as_deref(), Some("笔记..md"));
+        assert_eq!(rename_file_name("记录...", "记录.md").as_deref(), Some("记录....md"));
+        // 手打全名同样原样往返：`记录...md` 只剥一次同名后缀再拼回
+        assert_eq!(rename_file_name("记录...md", "记录.md").as_deref(), Some("记录...md"));
+        assert_eq!(filename_with_ext("名字...", "atb").as_deref(), Some("名字....atb"));
+        // 无扩展名的条目名就到此为止，尾点由 sanitize 补 `_`
+        assert_eq!(rename_file_name("笔记.", "readme").as_deref(), Some("笔记._"));
+        // 保留名在拼扩展名之前就要避开：`con` 加任何扩展名都非法
+        assert_eq!(filename_with_ext("con.", "md").as_deref(), Some("_con..md"));
+        assert_eq!(filename_with_ext("CON.v2", "md").as_deref(), Some("_CON.v2.md"));
+        // 全点主名拼出来是隐藏名（`.md`），按无效处理
+        assert_eq!(filename_with_ext("...", "md"), None);
+        assert_eq!(rename_file_name("...", "笔记.md"), None);
+    }
+
     #[test]
     fn draft_name_strips_typed_extension() {
         assert_eq!(draft_file_name("表", Some("atb")).as_deref(), Some("表"));
@@ -2030,6 +2076,10 @@ mod file_name_tests {
         assert_eq!(draft_file_name("笔记.md", Some("md")).as_deref(), Some("笔记"));
         assert_eq!(draft_file_name("素材", None).as_deref(), Some("素材"));
         assert_eq!(draft_file_name("  ", Some("md")), None);
+        // 扩展名由调用方拼接：尾点原样保留（拼接后不是文件尾），不落成 `表._.atb`
+        assert_eq!(draft_file_name("表.", Some("atb")).as_deref(), Some("表."));
+        assert_eq!(draft_file_name("con.", Some("md")).as_deref(), Some("_con."));
+        assert_eq!(draft_file_name("...", Some("md")), None);
     }
 }
 

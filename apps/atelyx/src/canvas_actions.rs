@@ -2252,8 +2252,7 @@ async fn write_note_file(
     let stem = {
         let t = title.trim();
         let t = t.strip_suffix(".md").unwrap_or(t);
-        let s = vault::sanitize_filename(t);
-        if s.is_empty() { "文本卡".to_string() } else { s }
+        vault::sanitize_stem(t).unwrap_or_else(|| "文本卡".to_string())
     };
     let mut seq = 1usize;
     let rel = loop {

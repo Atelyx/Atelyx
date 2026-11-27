@@ -2615,6 +2615,13 @@ async fn rename_edges_reserved_name_id_conflict_and_case_only() {
     assert_eq!(status, 200, "保留名补丁应成功：{resp}");
     assert_eq!(resp["file"], "画布/_CON.atlx", "保留名应加前缀净化：{resp}");
 
+    // title 尾部的点原样保留：拼扩展名后点不再是文件尾，不落成「尾点._.atlx」
+    let (status, _) = put("画布/尾点.atlx".into(), "cv-dot".into(), "尾点".into()).await;
+    assert_eq!(status, 200);
+    let (status, resp) = patch_title("画布/尾点.atlx".into(), "cv-dot".into(), "尾点.".into()).await;
+    assert_eq!(status, 200, "尾点标题应成功：{resp}");
+    assert_eq!(resp["file"], "画布/尾点..atlx", "尾点应保留，不得补 `_`：{resp}");
+
     // 同名异 id：乙改名撞上甲已占用的名称 → 409，不静默覆盖
     let (status, _) = put("画布/甲.atlx".into(), "cv-a".into(), "甲".into()).await;
     assert_eq!(status, 200);

@@ -7,7 +7,7 @@ use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    atomic_write, image_ext_of, now_secs, read_dir_filtered, safe_join, sanitize_filename, CachedFile,
+    atomic_write, filename_with_ext, image_ext_of, now_secs, read_dir_filtered, safe_join, CachedFile,
     VaultState,
 };
 
@@ -204,9 +204,11 @@ fn cache_evict<T>(cache_lock: &std::sync::Mutex<HashMap<String, CachedFile<T>>>,
 }
 
 /// 由旧相对路径 + 新标题算新相对路径（同目录改文件名；净化规则与落盘一致）。
-/// 画布/表格共用（ext = "atlx" / "atb"）。
+/// 画布/表格共用（ext = "atlx" / "atb"）；标题净化后为空 = 保持原路径。
 pub fn rel_with_new_title(old_file: &str, new_title: &str, ext: &str) -> String {
-    let filename = format!("{}.{ext}", sanitize_filename(new_title));
+    let Some(filename) = filename_with_ext(new_title, ext) else {
+        return old_file.to_string();
+    };
     match old_file.rfind('/') {
         Some(i) => format!("{}/{}", &old_file[..i], filename),
         None => filename,
